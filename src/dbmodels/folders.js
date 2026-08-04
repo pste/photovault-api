@@ -89,6 +89,13 @@ async function getBreadcrumb(root_id, folderPath) {
 
 // Le prime N thumbnail di una cartella, per il mosaico del tile.
 // E' quel dettaglio che fa sembrare un'app per foto invece di un file manager.
+//
+// Si campiona dall'INTERO sottoalbero, non dai soli figli diretti: in un
+// archivio vero le foto stanno nelle foglie, quindi limitarsi ai figli diretti
+// lascerebbe grigie tutte le cartelle intermedie, che sono proprio quelle che
+// si vedono per prime. Il confronto per prefisso usa il path materializzato e
+// il suo indice text_pattern_ops; la LATERAL applica il LIMIT per cartella,
+// cosi' non si legge l'intero sottoalbero per poi buttarlo via.
 async function getFolderPreviews(folder_ids, perFolder) {
     if (!folder_ids || folder_ids.length === 0) {
         return [];
@@ -96,19 +103,20 @@ async function getFolderPreviews(folder_ids, perFolder) {
     const client = await pool.connect();
     try {
         const stm = `
-            SELECT folder_id, media_id, updated
-            FROM (
-                SELECT m.folder_id, m.media_id, m.updated,
-                       row_number() OVER (
-                           PARTITION BY m.folder_id
-                           ORDER BY m.capture_ts DESC NULLS LAST, m.media_id
-                       ) AS rn
+            SELECT p.folder_id, t.media_id, t.updated
+            FROM folders p
+            JOIN LATERAL (
+                SELECT m.media_id, m.updated
                 FROM media m
-                WHERE m.folder_id = ANY($1)
+                JOIN folders f ON f.folder_id = m.folder_id
+                WHERE f.root_id = p.root_id
+                  AND f."path" LIKE p."path" || '%'
                   AND m.missing_since IS NULL
                   AND m.thumb_status = 'done'
-            ) t
-            WHERE t.rn <= $2`;
+                ORDER BY m.capture_ts DESC NULLS LAST, m.media_id
+                LIMIT $2
+            ) t ON true
+            WHERE p.folder_id = ANY($1)`;
         logger.trace('DB: getFolderPreviews');
         const res = await client.query(stm, [folder_ids, perFolder]);
         return res.rows;
