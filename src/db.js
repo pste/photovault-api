@@ -1,0 +1,202 @@
+const logger = require('./logger');
+const utils = require('./utils');
+
+const roots = require('./dbmodels/roots');
+const folders = require('./dbmodels/folders');
+const media = require('./dbmodels/media');
+const tags = require('./dbmodels/tags');
+const jobs = require('./dbmodels/jobs');
+const parameters = require('./dbmodels/parameters');
+const dblog = require('./dbmodels/logs');
+
+// Sotto questa frazione di media ritrovati, il reconcile si rifiuta di lavorare.
+// Vedi refuseReason() piu' sotto per il perche'.
+const RECONCILE_MIN_RATIO = 0.9;
+
+// Quante anteprime mostrare nel mosaico del tile di una cartella.
+const FOLDER_PREVIEWS = 4;
+
+/////////////////////////////////////////////////////////////////
+
+// Contenuto di una cartella: breadcrumb, sottocartelle (con le anteprime per il
+// mosaico) e media paginati. E' la query che alimenta la pagina principale.
+async function browseFolder(folder_id, root_id, limit, offset) {
+    let folder = null;
+    let rootId = root_id;
+
+    if (folder_id) {
+        folder = await folders.getFolder(folder_id);
+        if (!folder) {
+            return null;
+        }
+        rootId = folder.root_id;
+    }
+    else {
+        // Senza folder si apre la cartella radice della root: ogni root ne ha
+        // esattamente una, con path vuoto. Serve perche' i file che stanno
+        // direttamente nella radice della share devono comunque avere una
+        // cartella (media.folder_id e' NOT NULL), e perche' cosi' la radice si
+        // naviga con lo stesso codice di qualunque altra cartella.
+        folder = await folders.getFolderByPath(rootId, '');
+    }
+
+    // Una root mai scansionata non ha ancora la sua cartella radice: si
+    // risponde con una vista vuota invece che con un 404.
+    if (!folder) {
+        return { folder: null, breadcrumb: [], subfolders: [], media: [], total: 0, limit, offset };
+    }
+
+    const subfolders = await folders.getSubfolders(rootId, folder.folder_id);
+    const breadcrumb = await folders.getBreadcrumb(rootId, folder.path);
+
+    // Anteprime: una query sola per tutte le sottocartelle, non una per tile.
+    const ids = subfolders.map((f) => f.folder_id);
+    const previews = await folders.getFolderPreviews(ids, FOLDER_PREVIEWS);
+    for (const sub of subfolders) {
+        sub.previews = previews
+            .filter((p) => p.folder_id === sub.folder_id)
+            .map((p) => ({ media_id: p.media_id, v: Math.floor(new Date(p.updated).getTime() / 1000) }));
+    }
+
+    const items = await media.getMediaInFolder(folder.folder_id, limit, offset);
+    const total = await media.countMediaInFolder(folder.folder_id);
+
+    return { folder, breadcrumb, subfolders, media: items, total, limit, offset };
+}
+
+async function getMediaDetail(media_id) {
+    const item = await media.getMedia(media_id);
+    if (!item) {
+        return null;
+    }
+    item.tags = await tags.getMediaTags(media_id);
+    return item;
+}
+
+async function search(filters, limit, offset) {
+    const items = await media.search(filters, limit, offset);
+    const total = await media.countSearch(filters);
+    return { media: items, total, limit, offset };
+}
+
+/////////////////////////////////////////////////////////////////
+// Scansione
+
+// Crea (o ritrova) una cartella a partire dal suo percorso relativo alla root.
+// Il parent viene risolto qui dal percorso, cosi' lo scan non deve tenere traccia
+// degli id mentre cammina: manda solo il path.
+async function registerFolder(root_id, folderPath) {
+    const path = utils.normalizeFolderPath(folderPath);
+
+    // Percorso vuoto = la cartella radice della root. Esiste sempre, e' il
+    // genitore di tutto e ospita i file che stanno direttamente nella share.
+    if (path === '') {
+        const root = await roots.getRoot(root_id);
+        const name = root ? root.name : 'root';
+        return await folders.upsertFolder(root_id, null, name, '', 0);
+    }
+
+    // Si percorre la catena dal primo livello fino in fondo, creando (o
+    // ritrovando) ogni antenato con il SUO parent corretto.
+    // Non si puo' creare l'antenato con parent_id=null e basta: l'ON CONFLICT
+    // di upsertFolder riscrive parent_id, quindi passare null azzererebbe il
+    // legame di una cartella intermedia gia' collegata, spezzando l'albero.
+    // La catena parte SEMPRE dalla cartella radice, cosi' il primo livello ha un
+    // genitore vero e l'albero e' collegato per intero.
+    const rootFolder = await registerFolder(root_id, '');
+    const parts = path.split('/').filter((s) => s.length > 0);
+    let parent_id = rootFolder.folder_id;
+    let acc = '';
+    let folder = rootFolder;
+
+    for (let i = 0; i < parts.length; i++) {
+        acc = acc + parts[i] + '/';
+        folder = await folders.upsertFolder(root_id, parent_id, parts[i], acc, i + 1);
+        parent_id = folder.folder_id;
+    }
+
+    return folder;
+}
+
+async function ingestMedia(items) {
+    return await media.upsertMediaBatch(items);
+}
+
+// Perche' il guard: una share CIFS irraggiungibile, o montata a meta', restituisce
+// una directory vuota. A livello di syscall e' indistinguibile da "l'utente ha
+// cancellato tutte le foto". Senza questo controllo un solo mount ballerino
+// cancellerebbe l'intero indice.
+function refuseReason(seen, known) {
+    if (known > 0 && seen < known * RECONCILE_MIN_RATIO) {
+        return `reconcile rifiutato: visti ${seen} media su ${known} noti`;
+    }
+    return null;
+}
+
+// Chiude una scansione: marca come mancanti i media non piu' visti e ricalcola
+// i contatori denormalizzati delle cartelle.
+async function reconcileScan(root_id, scanStartedAt) {
+    const root = await roots.getRoot(root_id);
+    if (!root) {
+        throw new Error(`reconcileScan: root ${root_id} inesistente`);
+    }
+
+    const seen = await media.countSeenSince(root_id, scanStartedAt);
+    const refused = refuseReason(seen, root.media_count);
+    if (refused) {
+        logger.error({ root_id, seen, known: root.media_count }, refused);
+        dblog.createLog('RECONCILE REFUSED', refused);
+        return { refused: true, reason: refused, seen, known: root.media_count };
+    }
+
+    const missing = await media.markMissing(root_id, scanStartedAt);
+    await folders.refreshCounts(root_id);
+    await roots.closeScan(root_id, seen);
+
+    logger.info({ root_id, seen, missing }, 'reconcile completato');
+    return { refused: false, seen, missing };
+}
+
+/////////////////////////////////////////////////////////////////
+// Tag
+
+// I tag applicati dai cron arrivano per nome, non per id: il vocabolario vive
+// nel repo di photovault-label, non nel database.
+async function applyTags(media_id, list, source) {
+    for (const entry of list) {
+        const tag = await tags.upsertTag(entry.name, entry.display_name || entry.name, entry.kind || 'scene');
+        await tags.addMediaTag(media_id, tag.tag_id, entry.score, source);
+    }
+}
+
+/////////////////////////////////////////////////////////////////
+
+module.exports = {
+    // browse
+    browseFolder, getMediaDetail, search,
+    getRoots: roots.getRoots,
+    getStats: media.getStats,
+    // scan
+    registerFolder, ingestMedia, reconcileScan,
+    getPending: media.getPending,
+    setThumbResults: media.setThumbResults,
+    upsertRoot: roots.upsertRoot,
+    // tag
+    applyTags,
+    getTags: tags.getTags,
+    upsertTag: tags.upsertTag,
+    addMediaTag: tags.addMediaTag,
+    removeMediaTag: tags.removeMediaTag,
+    // job
+    getJobs: jobs.getJobs,
+    deleteJob: jobs.deleteJob,
+    claimNextJob: jobs.claimNextJob,
+    updateJobStatus: jobs.updateJobStatus,
+    upsertPendingJob: jobs.upsertPendingJob,
+    // parametri e log
+    getParameters: parameters.getParameters,
+    saveParameters: parameters.saveParameters,
+    getLogs: dblog.getLogs,
+    // esportata per i test
+    refuseReason,
+};
