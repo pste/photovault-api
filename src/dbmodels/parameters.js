@@ -8,6 +8,7 @@ const EDITABLE = [
     'cron_scan', 'cron_label', 'cron_dedup',
     'thumb_small_px', 'thumb_medium_px',
     'clip_min_score', 'dedup_max_distance', 'page_size',
+    'trash_retention_days',
 ];
 
 async function getParameters() {

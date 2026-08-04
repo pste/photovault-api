@@ -7,7 +7,10 @@ const media = require('./dbmodels/media');
 const tags = require('./dbmodels/tags');
 const jobs = require('./dbmodels/jobs');
 const parameters = require('./dbmodels/parameters');
+const duplicates = require('./dbmodels/duplicates');
+const trash = require('./dbmodels/trash');
 const dblog = require('./dbmodels/logs');
+const dedup = require('./dedup');
 
 // Sotto questa frazione di media ritrovati, il reconcile si rifiuta di lavorare.
 // Vedi refuseReason() piu' sotto per il perche'.
@@ -170,6 +173,82 @@ async function applyTags(media_id, list, source) {
 }
 
 /////////////////////////////////////////////////////////////////
+// Duplicati e cestino
+
+async function rebuildDuplicates() {
+    const pars = await parameters.getParameters();
+    return await dedup.rebuild(pars.dedup_max_distance);
+}
+
+async function getDuplicates(status, kind, limit, offset) {
+    const groups = await duplicates.getGroups(status, kind, limit, offset);
+    // Le miniature dei primi membri servono a riconoscere il gruppo a colpo
+    // d'occhio senza aprirlo.
+    for (const group of groups) {
+        group.members = await duplicates.getGroupMembers(group.dup_group_id);
+    }
+    const total = await duplicates.countGroups(status, kind);
+    return { groups, total, limit, offset };
+}
+
+async function getDuplicateGroup(dup_group_id) {
+    const group = await duplicates.getGroup(dup_group_id);
+    if (!group) {
+        return null;
+    }
+    group.members = await duplicates.getGroupMembers(dup_group_id);
+    return group;
+}
+
+// Risolve un gruppo. 'ignore' lo archivia senza toccare i file; 'trash' mette
+// in coda lo spostamento di tutti i membri tranne quello da tenere.
+//
+// L'API non sposta nulla: accoda il lavoro e lascia fare al pod scan, che e'
+// l'unico con la share in scrittura. Cosi' un bug qui non puo' danneggiare la
+// libreria.
+async function resolveDuplicateGroup(dup_group_id, keep_media_id, action) {
+    const group = await duplicates.getGroup(dup_group_id);
+    if (!group) {
+        return null;
+    }
+
+    if (action === 'ignore') {
+        await duplicates.setGroupStatus(dup_group_id, 'ignored');
+        return { dup_group_id, action, cestinati: 0 };
+    }
+
+    const members = await duplicates.getGroupMembers(dup_group_id);
+    const keeper = keep_media_id || (members.find((m) => m.is_keeper) || {}).media_id;
+    if (!keeper) {
+        throw new Error('resolveDuplicateGroup: nessun file da tenere indicato');
+    }
+    if (!members.some((m) => m.media_id === keeper)) {
+        throw new Error('resolveDuplicateGroup: il file da tenere non appartiene al gruppo');
+    }
+
+    let queued = 0;
+    for (const member of members) {
+        if (member.media_id !== keeper) {
+            await trash.requestTrash(member.media_id);
+            queued++;
+        }
+    }
+
+    await duplicates.setGroupStatus(dup_group_id, 'resolved');
+    if (queued > 0) {
+        await jobs.upsertPendingJob('trashapply', new Date());
+    }
+    return { dup_group_id, action: 'trash', cestinati: queued, keep_media_id: keeper };
+}
+
+// Coda del job trashpurge: i giorni di ritenzione sono un parametro, non una
+// costante, cosi' si allargano dalla pagina Impostazioni senza ricompilare.
+async function getExpiredTrash(limit) {
+    const pars = await parameters.getParameters();
+    return await trash.getExpiredTrash(pars.trash_retention_days, limit);
+}
+
+/////////////////////////////////////////////////////////////////
 
 module.exports = {
     // browse
@@ -193,6 +272,17 @@ module.exports = {
     claimNextJob: jobs.claimNextJob,
     updateJobStatus: jobs.updateJobStatus,
     upsertPendingJob: jobs.upsertPendingJob,
+    // duplicati
+    rebuildDuplicates, getDuplicates, getDuplicateGroup, resolveDuplicateGroup,
+    saveHashes: duplicates.saveHashes,
+    getDuplicateStats: duplicates.getStats,
+    // cestino
+    getExpiredTrash,
+    getPendingTrash: trash.getPendingTrash,
+    completeTrash: trash.completeTrash,
+    completePurge: trash.completePurge,
+    getTrash: trash.getTrash,
+    getTrashStats: trash.getTrashStats,
     // parametri e log
     getParameters: parameters.getParameters,
     saveParameters: parameters.saveParameters,

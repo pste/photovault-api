@@ -234,6 +234,57 @@ fastify.register((instance, opts, done) => {
         return { ok: true };
     });
 
+    // ---------- duplicati ----------
+
+    instance.get('/duplicates', async (req) => {
+        const { limit, offset } = paging(req.query);
+        return await db.getDuplicates(
+            req.query.status || 'open', req.query.kind || null, limit, offset);
+    });
+
+    instance.get('/duplicates/stats', async () => {
+        return await db.getDuplicateStats();
+    });
+
+    instance.get('/duplicates/:id', async (req, reply) => {
+        const group = await db.getDuplicateGroup(utils.toInt(req.params.id, null));
+        if (!group) {
+            return reply.status(404).send({ error: 'gruppo non trovato' });
+        }
+        return group;
+    });
+
+    // action: 'trash' sposta nel cestino tutto tranne keep_media_id,
+    //         'ignore' archivia il gruppo senza toccare i file.
+    instance.post('/duplicates/:id/resolve', async (req, reply) => {
+        const { keep_media_id, action } = req.body || {};
+        if (action !== 'trash' && action !== 'ignore') {
+            return reply.status(400).send({ error: "action deve essere 'trash' oppure 'ignore'" });
+        }
+        try {
+            const outcome = await db.resolveDuplicateGroup(
+                utils.toInt(req.params.id, null), utils.toInt(keep_media_id, null), action);
+            if (!outcome) {
+                return reply.status(404).send({ error: 'gruppo non trovato' });
+            }
+            return outcome;
+        }
+        catch(err) {
+            return reply.status(400).send({ error: err.message });
+        }
+    });
+
+    // ---------- cestino ----------
+
+    instance.get('/trash', async (req) => {
+        const { limit, offset } = paging(req.query);
+        return await db.getTrash(req.query.status || null, limit, offset);
+    });
+
+    instance.get('/trash/stats', async () => {
+        return await db.getTrashStats();
+    });
+
     // ---------- job e parametri ----------
 
     instance.get('/jobs', async () => {
@@ -378,6 +429,45 @@ fastify.register((instance, opts, done) => {
         }
         const count = await db.setThumbResults(items);
         return { count };
+    });
+
+    // ---------- duplicati ----------
+
+    instance.post('/dedup/hashes', async (req, reply) => {
+        const items = (req.body || {}).items;
+        if (!Array.isArray(items)) {
+            return reply.status(400).send({ error: 'serve items[]' });
+        }
+        const count = await db.saveHashes(items);
+        return { count };
+    });
+
+    instance.post('/dedup/rebuild', async () => {
+        return await db.rebuildDuplicates();
+    });
+
+    // ---------- cestino ----------
+
+    instance.get('/trash/pending', async (req) => {
+        const limit = utils.clamp(utils.toInt(req.query.limit, DEFAULT_PAGE), 1, MAX_PAGE);
+        return await db.getPendingTrash(limit);
+    });
+
+    instance.get('/trash/expired', async (req) => {
+        const limit = utils.clamp(utils.toInt(req.query.limit, DEFAULT_PAGE), 1, MAX_PAGE);
+        return await db.getExpiredTrash(limit);
+    });
+
+    instance.post('/trash/:id/done', async (req) => {
+        const { status, result } = req.body || {};
+        await db.completeTrash(utils.toInt(req.params.id, null), status, result);
+        return { ok: true };
+    });
+
+    instance.post('/trash/:id/purged', async (req) => {
+        const { status, result } = req.body || {};
+        await db.completePurge(utils.toInt(req.params.id, null), status || 'purged', result);
+        return { ok: true };
     });
 
     done();
