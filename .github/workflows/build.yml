@@ -1,0 +1,56 @@
+name: Build and Push Docker Image
+
+on:
+    push:
+        tags:
+            - 'v*' # solo sui tag v1.2.3
+
+jobs:
+    build-and-push:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Log in to Docker Hub
+              uses: docker/login-action@v3
+              with:
+                username: ${{ vars.DOCKERHUB_USERNAME }}
+                password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+            - name: Get TAG name
+              id: tag
+              run: echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+            - name: Build and Push
+              uses: docker/build-push-action@v5
+              with:
+                context: .
+                file: .docker/Dockerfile
+                push: true
+                tags: |
+                  pirraste/photovault-api:${{ steps.tag.outputs.TAG }}
+
+            - name: Install kustomize
+              run: |
+                curl -sLo kustomize.tar.gz https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv5.4.1/kustomize_v5.4.1_linux_amd64.tar.gz
+                tar -xzf kustomize.tar.gz
+                sudo mv kustomize /usr/local/bin/
+
+            # Scrive il tag appena costruito nel repo dei manifest: e' ArgoCD,
+            # leggendo quel commit, a far partire il rollout sul cluster.
+            - name: Write back image tag in k8s repo
+              env:
+                GH_TOKEN: ${{ secrets.K8S_REPO_TOKEN }}
+                IMAGE: pirraste/photovault-api
+                TAG: ${{ github.ref_name }}
+              run: |
+                git clone https://x-access-token:${GH_TOKEN}@github.com/pste/photovault-k8s.git k8s-repo
+                cd k8s-repo/k8s
+                kustomize edit set image ${IMAGE}:${TAG}
+                git config user.email "actions@github.com"
+                git config user.name "GitHub Actions"
+                git add kustomization.yaml
+                git commit -m "chore: update ${IMAGE} to ${TAG}"
+                git push
