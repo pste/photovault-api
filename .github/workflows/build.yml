@@ -47,10 +47,25 @@ jobs:
                 TAG: ${{ github.ref_name }}
               run: |
                 git clone https://x-access-token:${GH_TOKEN}@github.com/pste/photovault-k8s.git k8s-repo
-                cd k8s-repo/k8s
-                kustomize edit set image ${IMAGE}:${TAG}
+                cd k8s-repo
                 git config user.email "actions@github.com"
                 git config user.name "GitHub Actions"
-                git add kustomization.yaml
-                git commit -m "chore: update ${IMAGE} to ${TAG}"
-                git push
+                # I quattro repo componente scrivono tutti su questo stesso
+                # file, e al primo rilascio taggano insieme: chi arriva secondo
+                # si vede rifiutare il push. Si ritenta ripartendo da origin
+                # aggiornato invece che con un rebase, perche' rifare
+                # "kustomize edit set image" e' idempotente e non puo' andare
+                # in conflitto.
+                for i in 1 2 3 4 5; do
+                  git fetch origin main
+                  git reset --hard origin/main
+                  (cd k8s && kustomize edit set image ${IMAGE}:${TAG})
+                  git add k8s/kustomization.yaml
+                  # Niente da cambiare: il tag e' gia' quello. Non e' un errore.
+                  git commit -m "chore: update ${IMAGE} to ${TAG}" || exit 0
+                  if git push origin main; then exit 0; fi
+                  echo "push respinto, ritento (tentativo $i)"
+                  sleep $(( (RANDOM % 10) + 5 ))
+                done
+                echo "write-back fallito dopo 5 tentativi"
+                exit 1
