@@ -296,6 +296,11 @@ async function getPending(stage, limit) {
     const client = await pool.connect();
     try {
         const stm = `
+            -- m.orientation non serve piu' al pod nuovo, che legge l'EXIF da
+            -- se'. Resta perche' il pod VECCHIO ci raddrizza le immagini: nella
+            -- finestra fra il rilascio dell'API e quello dello scan, senza
+            -- questa colonna le foto verticali diventerebbero thumbnail storte,
+            -- marcate 'done' e mai piu' rigenerate.
             SELECT m.media_id, m.file_name, m.media_kind, m.ext, m.file_size,
                    m.orientation, f."path" AS folder_path, r.rel_path
             FROM media m
@@ -317,8 +322,15 @@ async function getPending(stage, limit) {
     }
 }
 
-// Esito della generazione thumbnail. Le dimensioni reali si conoscono solo dopo
-// aver decodificato l'immagine, quindi il job le rimanda indietro insieme allo stato.
+// Esito della generazione thumbnail, e con esso tutti i metadati del file.
+//
+// Viaggiano insieme perche' escono dallo stesso lavoro: il job apre il file una
+// volta sola e ne ricava sia l'anteprima sia l'EXIF. Lo scan non li manda piu',
+// perche' camminare la share e aprire 146.000 file sono due mestieri diversi.
+//
+// Ogni campo e' in COALESCE: un valore assente non cancella quello che c'e'.
+// Vale anche per capture_ts, che lo scan ha gia' valorizzato con l'mtime -- se
+// il file non ha una data EXIF, quel ripiego resta.
 async function setThumbResults(items) {
     if (!items || items.length === 0) {
         return 0;
@@ -329,14 +341,27 @@ async function setThumbResults(items) {
         const stm = `
             UPDATE media SET
                 thumb_status = $2,
-                width  = COALESCE($3, width),
-                height = COALESCE($4, height),
+                width        = COALESCE($3, width),
+                height       = COALESCE($4, height),
+                duration_s   = COALESCE($5, duration_s),
+                orientation  = COALESCE($6, orientation),
+                capture_ts   = COALESCE($7, capture_ts),
+                camera_make  = COALESCE($8, camera_make),
+                camera_model = COALESCE($9, camera_model),
+                gps_lat      = COALESCE($10, gps_lat),
+                gps_lon      = COALESCE($11, gps_lon),
                 updated = NOW()
             WHERE media_id = $1`;
         for (const item of items) {
+            // ?? e non ||: la longitudine 0 e' un valore legittimo (Greenwich),
+            // e con || sparirebbe insieme ai campi davvero assenti.
             await client.query(stm, [
                 item.media_id, item.thumb_status,
-                item.width || null, item.height || null,
+                item.width ?? null, item.height ?? null,
+                item.duration_s ?? null, item.orientation ?? null,
+                item.capture_ts ?? null,
+                item.camera_make ?? null, item.camera_model ?? null,
+                item.gps_lat ?? null, item.gps_lon ?? null,
             ]);
         }
         await client.query('COMMIT');
