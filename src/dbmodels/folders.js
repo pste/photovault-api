@@ -2,6 +2,7 @@ const logger = require('../logger');
 const dblog = require('./logs');
 const pool = require('./dbpool');
 const utils = require('../utils');
+const { NOT_TRASHED_MEDIA } = require('./sqlparts');
 
 async function getFolder(folder_id) {
     const client = await pool.connect();
@@ -65,7 +66,8 @@ async function getFolderCounts(folder_ids) {
         const stm = `
             SELECT f.folder_id,
                    (SELECT count(*) FROM media m
-                     WHERE m.folder_id = f.folder_id AND m.missing_since IS NULL) AS media_count,
+                     WHERE m.folder_id = f.folder_id AND m.missing_since IS NULL
+                       AND ${NOT_TRASHED_MEDIA('m')}) AS media_count,
                    (SELECT count(*) FROM folders s
                      WHERE s.parent_id = f.folder_id AND s.missing_since IS NULL) AS sub_count
             FROM folders f
@@ -151,6 +153,7 @@ async function getFolderPreviews(folder_ids, perFolder) {
                   AND f."path" LIKE p."path" || '%'
                   AND m.missing_since IS NULL
                   AND m.thumb_status = 'done'
+                  AND ${NOT_TRASHED_MEDIA('m')}
                 ORDER BY m.capture_ts DESC NULLS LAST, m.media_id
                 LIMIT $2
             ) t ON true

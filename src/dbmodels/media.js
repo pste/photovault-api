@@ -1,6 +1,7 @@
 const logger = require('../logger');
 const dblog = require('./logs');
 const pool = require('./dbpool');
+const { NOT_TRASHED_MEDIA } = require('./sqlparts');
 
 // Colonne scritte dallo scan, nell'ordine usato dall'INSERT multi-riga.
 const SCAN_COLUMNS = [
@@ -53,6 +54,7 @@ async function getMediaInFolder(folder_id, limit, offset) {
             SELECT ${GRID_FIELDS}
             FROM media m
             WHERE m.folder_id = $1 AND m.missing_since IS NULL
+              AND ${NOT_TRASHED_MEDIA('m')}
             ORDER BY m.capture_ts DESC NULLS LAST, m.media_id
             LIMIT $2 OFFSET $3`;
         logger.trace({ folder_id, limit, offset }, 'DB: getMediaInFolder');
@@ -71,7 +73,9 @@ async function getMediaInFolder(folder_id, limit, offset) {
 async function countMediaInFolder(folder_id) {
     const client = await pool.connect();
     try {
-        const stm = 'SELECT count(*)::int AS n FROM media WHERE folder_id = $1 AND missing_since IS NULL';
+        const stm = `SELECT count(*)::int AS n FROM media m
+                     WHERE m.folder_id = $1 AND m.missing_since IS NULL
+                       AND ${NOT_TRASHED_MEDIA('m')}`;
         const res = await client.query(stm, [folder_id]);
         return res.rows[0].n;
     }
@@ -99,6 +103,7 @@ function buildSearch(filters, forCount) {
     ];
     const where = `
         WHERE m.missing_since IS NULL
+          AND ${NOT_TRASHED_MEDIA('m')}
           AND ($1::varchar IS NULL OR lower(m.file_name) LIKE '%' || lower($1) || '%'
                                    OR lower(f."path") LIKE '%' || lower($1) || '%')
           AND ($2::varchar IS NULL OR m.media_kind = $2)
