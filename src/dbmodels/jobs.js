@@ -35,6 +35,36 @@ async function deleteJob(job_id) {
     }
 }
 
+// Quanto puo' restare muto un job prima di essere considerato orfano.
+// Generoso di proposito: un job vivo tocca il proprio battito a ogni blocco di
+// lavoro -- per thumbs, ogni cento anteprime, cioe' meno di un minuto -- quindi
+// mezz'ora di silenzio significa che il pod non c'e' piu'. La soglia non puo'
+// invece guardare da quanto il job e' partito: thumbs su 338.000 file gira
+// legittimamente per giorni.
+const STALE_MINUTES = parseInt(process.env.JOB_STALE_MINUTES || '30', 10);
+
+// Recupera i job rimasti 'running' senza che nessun pod li chiuda.
+//
+// Gira qui dentro, e non in un job dedicato, per due motivi: e' esattamente il
+// momento in cui la cosa conta -- qualcuno sta chiedendo lavoro -- e un reaper
+// che fosse a sua volta un job potrebbe morire lasciando appeso se' stesso.
+async function reapStaleJobs(client) {
+    const stm = `
+        UPDATE jobs
+        SET status = 'error',
+            ended = NOW(),
+            "result" = 'job orfano: nessun battito da oltre ' || $1 || ' minuti'
+        WHERE status = 'running'
+          AND COALESCE(heartbeat, started) < NOW() - ($1 || ' minutes')::interval
+        RETURNING job_id, "name"`;
+    const res = await client.query(stm, [STALE_MINUTES]);
+    for (const row of res.rows) {
+        logger.warn({ job_id: row.job_id, name: row.name }, 'job orfano recuperato');
+        dblog.createLog('JOB ORFANO', `${row.name} (job ${row.job_id}) senza battito, rimesso in errore`);
+    }
+    return res.rows.length;
+}
+
 // Prende in carico atomicamente il job pendente piu' vecchio, marcandolo running.
 //
 // Il filtro "name" = ANY($1) e' OBBLIGATORIO e non e' un'ottimizzazione: qui,
@@ -45,8 +75,10 @@ async function deleteJob(job_id) {
 async function claimNextJob(names) {
     const client = await pool.connect();
     try {
+        await reapStaleJobs(client);
+
         const stm = `
-            UPDATE jobs SET status = 'running', started = NOW()
+            UPDATE jobs SET status = 'running', started = NOW(), heartbeat = NOW()
             WHERE job_id = (
                 SELECT job_id FROM jobs
                 WHERE status = 'pending'
@@ -63,6 +95,25 @@ async function claimNextJob(names) {
     }
     catch(err) {
         dblog.createLog('ERROR DB claimNextJob', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
+// Segno di vita di un job in esecuzione. Il pod lo manda a ogni blocco di
+// lavoro concluso: e' cio' che distingue un job lento da un job orfano.
+async function touchJob(job_id) {
+    const client = await pool.connect();
+    try {
+        const res = await client.query(
+            `UPDATE jobs SET heartbeat = NOW() WHERE job_id = $1 AND status = 'running'`,
+            [job_id]);
+        return res.rowCount > 0;
+    }
+    catch(err) {
+        dblog.createLog('ERROR DB touchJob', err);
         throw err;
     }
     finally {
@@ -113,4 +164,4 @@ async function upsertPendingJob(name, when) {
     }
 }
 
-module.exports = { getJobs, deleteJob, claimNextJob, updateJobStatus, upsertPendingJob };
+module.exports = { getJobs, deleteJob, claimNextJob, touchJob, updateJobStatus, upsertPendingJob };

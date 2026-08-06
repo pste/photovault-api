@@ -351,6 +351,7 @@ module.exports = {
     // job
     getJobs: jobs.getJobs,
     deleteJob: jobs.deleteJob,
+    touchJob: jobs.touchJob,
     claimNextJob: jobs.claimNextJob,
     updateJobStatus: jobs.updateJobStatus,
     upsertPendingJob: jobs.upsertPendingJob,

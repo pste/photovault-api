@@ -400,6 +400,19 @@ fastify.register((instance, opts, done) => {
         return await db.claimNextJob(names);
     });
 
+    // Battito: dice all'API che il pod e' ancora vivo e sta lavorando su quel
+    // job. Senza, dopo mezz'ora di silenzio il claim lo considera orfano.
+    instance.post('/jobs/:id/heartbeat', async (req, reply) => {
+        const job_id = utils.toInt(req.params.id, null);
+        const alive = await db.touchJob(job_id);
+        if (!alive) {
+            // Il job non e' piu' 'running': o e' stato chiuso a mano, o il
+            // reaper lo ha gia' recuperato. Il pod deve saperlo.
+            return reply.status(409).send({ error: 'job non in esecuzione' });
+        }
+        return { ok: true };
+    });
+
     instance.patch('/jobs/:id', async (req) => {
         const { status, result } = req.body || {};
         await db.updateJobStatus(utils.toInt(req.params.id, null), status, result);
