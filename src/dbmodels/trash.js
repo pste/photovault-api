@@ -36,6 +36,36 @@ async function requestTrash(media_id) {
     }
 }
 
+// Come requestTrash, ma per un file non gestito da photovault. La riga di
+// cestino ha la stessa forma -- e' fatta di percorsi -- quindi il pod scan
+// sposta questi file con lo stesso codice, senza sapere da dove vengano.
+async function requestTrashOther(other_id) {
+    const client = await pool.connect();
+    try {
+        const stm = `
+            INSERT INTO trash (other_id, root_id, original_path, trash_path, file_size)
+            SELECT o.other_id,
+                   o.root_id,
+                   o."path" || o.file_name,
+                   '.photovault/trash/' || to_char(NOW(), 'YYYYMMDD') || '/'
+                       || o.other_id || '_' || o.file_name,
+                   o.file_size
+            FROM other_files o
+            WHERE o.other_id = $1
+            RETURNING *`;
+        logger.trace({ other_id }, 'DB: requestTrashOther');
+        const res = await client.query(stm, [other_id]);
+        return res.rows[0] || null;
+    }
+    catch(err) {
+        dblog.createLog('ERROR DB requestTrashOther', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
 // Coda del job trashapply: file da spostare.
 async function getPendingTrash(limit) {
     const client = await pool.connect();
@@ -68,11 +98,19 @@ async function completeTrash(trash_id, status, result) {
     try {
         await client.query('BEGIN');
         const res = await client.query(
-            'UPDATE trash SET "status" = $2, executed = NOW(), "result" = $3 WHERE trash_id = $1 RETURNING media_id',
+            `UPDATE trash SET "status" = $2, executed = NOW(), "result" = $3
+             WHERE trash_id = $1 RETURNING media_id, other_id`,
             [trash_id, status, result || null]);
 
-        if (status === 'done' && res.rows[0] && res.rows[0].media_id) {
-            await client.query('DELETE FROM media WHERE media_id = $1', [res.rows[0].media_id]);
+        // Una riga di cestino viene da media oppure da other_files, mai da
+        // entrambe: a spostamento avvenuto sparisce quella di origine.
+        if (status === 'done' && res.rows[0]) {
+            if (res.rows[0].media_id) {
+                await client.query('DELETE FROM media WHERE media_id = $1', [res.rows[0].media_id]);
+            }
+            if (res.rows[0].other_id) {
+                await client.query('DELETE FROM other_files WHERE other_id = $1', [res.rows[0].other_id]);
+            }
         }
         await client.query('COMMIT');
         logger.trace({ trash_id, status }, 'DB: completeTrash');
@@ -179,6 +217,6 @@ async function getTrashStats() {
 }
 
 module.exports = {
-    requestTrash, getPendingTrash, completeTrash,
+    requestTrash, requestTrashOther, getPendingTrash, completeTrash,
     getExpiredTrash, completePurge, getTrash, getTrashStats,
 };

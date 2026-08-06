@@ -274,6 +274,22 @@ fastify.register((instance, opts, done) => {
         }
     });
 
+    // ---------- altri file ----------
+
+    // I file che photovault non gestisce: ne' immagini ne' video. Servono per
+    // sapere cosa c'e' sulla share oltre alla libreria, e per fare pulizia.
+    instance.get('/others', async (req) => {
+        const { limit, offset } = paging(req.query);
+        const ext = req.query.ext || null;
+        const items = await db.getOthers({ ext, sort: req.query.sort, limit, offset });
+        const total = await db.countOthers(ext);
+        return { items, total, limit, offset };
+    });
+
+    instance.get('/others/stats', async () => {
+        return await db.getOthersStats();
+    });
+
     // ---------- cestino ----------
 
     instance.get('/trash', async (req) => {
@@ -284,15 +300,17 @@ fastify.register((instance, opts, done) => {
     // Cestina media scelti a mano dalla griglia. Accoda soltanto: a spostare i
     // file e' il pod scan, e il job trashapply parte entro il quarto d'ora.
     instance.post('/trash', async (req, reply) => {
-        const ids = (req.body || {}).media_ids;
-        if (!Array.isArray(ids) || ids.length === 0) {
-            return reply.status(400).send({ error: 'serve media_ids[]' });
+        const body = req.body || {};
+        const ids = (list) => (Array.isArray(list) ? list : [])
+            .map((id) => utils.toInt(id, null))
+            .filter((id) => id !== null);
+
+        const media_ids = ids(body.media_ids);
+        const other_ids = ids(body.other_ids);
+        if (media_ids.length === 0 && other_ids.length === 0) {
+            return reply.status(400).send({ error: 'serve media_ids[] oppure other_ids[]' });
         }
-        const clean = ids.map((id) => utils.toInt(id, null)).filter((id) => id !== null);
-        if (clean.length === 0) {
-            return reply.status(400).send({ error: 'media_ids[] non contiene id validi' });
-        }
-        return await db.trashMedia(clean);
+        return await db.trashMedia(media_ids, other_ids);
     });
 
     instance.get('/trash/stats', async () => {
@@ -409,6 +427,15 @@ fastify.register((instance, opts, done) => {
         }
         const rows = await db.ingestMedia(items);
         return { count: rows.length, items: rows };
+    });
+
+    instance.post('/scan/other/batch', async (req, reply) => {
+        const items = (req.body || {}).items;
+        if (!Array.isArray(items)) {
+            return reply.status(400).send({ error: 'serve items[]' });
+        }
+        const count = await db.ingestOthers(items);
+        return { count };
     });
 
     instance.post('/scan/reconcile', async (req, reply) => {

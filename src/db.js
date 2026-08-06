@@ -9,6 +9,7 @@ const jobs = require('./dbmodels/jobs');
 const parameters = require('./dbmodels/parameters');
 const duplicates = require('./dbmodels/duplicates');
 const trash = require('./dbmodels/trash');
+const others = require('./dbmodels/others');
 const dblog = require('./dbmodels/logs');
 const dedup = require('./dedup');
 
@@ -132,6 +133,13 @@ async function ingestMedia(items) {
     return await media.upsertMediaBatch(items);
 }
 
+// I file che photovault non gestisce. Lo scan li manda a parte, in un batch
+// suo: non entrano in media perche' non hanno una pipeline da percorrere --
+// nessuno fara' mai la thumbnail di un .psd.
+async function ingestOthers(items) {
+    return await others.upsertBatch(items);
+}
+
 // Perche' il guard: una share CIFS irraggiungibile, o montata a meta', restituisce
 // una directory vuota. A livello di syscall e' indistinguibile da "l'utente ha
 // cancellato tutte le foto". Senza questo controllo un solo mount ballerino
@@ -143,8 +151,8 @@ function refuseReason(seen, known) {
     return null;
 }
 
-// Chiude una scansione: marca come mancanti i media non piu' visti e ricalcola
-// i contatori denormalizzati delle cartelle.
+// Chiude una scansione: marca come mancanti i media -- e i file non gestiti --
+// che non sono stati rivisti, e memorizza quanti ne ha contati la scansione.
 async function reconcileScan(root_id, scanStartedAt) {
     const root = await roots.getRoot(root_id);
     if (!root) {
@@ -160,9 +168,14 @@ async function reconcileScan(root_id, scanStartedAt) {
     }
 
     const missing = await media.markMissing(root_id, scanStartedAt);
+
+    // I file non gestiti seguono la sorte dei media: il guard che li protegge e'
+    // lo stesso, perche' se la share fosse mezza montata avremmo gia' rifiutato
+    // qui sopra e non saremmo arrivati a questa riga.
+    const missingOthers = await others.markMissing(root_id, scanStartedAt);
     await roots.closeScan(root_id, seen);
 
-    logger.info({ root_id, seen, missing }, 'reconcile completato');
+    logger.info({ root_id, seen, missing, missingOthers }, 'reconcile completato');
     return { refused: false, seen, missing };
 }
 
@@ -256,10 +269,16 @@ async function resolveDuplicateGroup(dup_group_id, keep_media_id, action) {
 // Un media gia' in cestino non viene accodato due volte -- requestTrash
 // restituisce null -- cosi' un doppio clic sul pulsante non genera due
 // spostamenti dello stesso file.
-async function trashMedia(media_ids) {
+async function trashMedia(media_ids, other_ids) {
     let queued = 0;
-    for (const media_id of media_ids) {
+    for (const media_id of media_ids || []) {
         const row = await trash.requestTrash(media_id);
+        if (row) {
+            queued++;
+        }
+    }
+    for (const other_id of other_ids || []) {
+        const row = await trash.requestTrashOther(other_id);
         if (row) {
             queued++;
         }
@@ -285,7 +304,7 @@ module.exports = {
     getRoots: roots.getRoots,
     getStats: media.getStats,
     // scan
-    registerFolder, ingestMedia, reconcileScan,
+    registerFolder, ingestMedia, ingestOthers, reconcileScan,
     getPending: media.getPending,
     setThumbResults: media.setThumbResults,
     upsertRoot: roots.upsertRoot,
@@ -305,6 +324,10 @@ module.exports = {
     rebuildDuplicates, getDuplicates, getDuplicateGroup, resolveDuplicateGroup,
     saveHashes: duplicates.saveHashes,
     getDuplicateStats: duplicates.getStats,
+    // altri file
+    getOthers: others.getOthers,
+    countOthers: others.countOthers,
+    getOthersStats: others.getStats,
     // cestino
     trashMedia, getExpiredTrash,
     getPendingTrash: trash.getPendingTrash,
