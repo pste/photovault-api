@@ -247,6 +247,29 @@ async function resolveDuplicateGroup(dup_group_id, keep_media_id, action) {
     return { dup_group_id, action: 'trash', cestinati: queued, keep_media_id: keeper };
 }
 
+// Cestina dei media scelti a mano dalla UI.
+//
+// Stessa strada della risoluzione dei duplicati, e non e' un caso: cestinare
+// vuol dire mettere in coda: a spostare il file e' il pod scan, l'unico con la
+// share in scrittura. Qui dentro non si cancella niente, e nemmeno si sposta.
+//
+// Un media gia' in cestino non viene accodato due volte -- requestTrash
+// restituisce null -- cosi' un doppio clic sul pulsante non genera due
+// spostamenti dello stesso file.
+async function trashMedia(media_ids) {
+    let queued = 0;
+    for (const media_id of media_ids) {
+        const row = await trash.requestTrash(media_id);
+        if (row) {
+            queued++;
+        }
+    }
+    if (queued > 0) {
+        await jobs.upsertPendingJob('trashapply', new Date());
+    }
+    return { cestinati: queued };
+}
+
 // Coda del job trashpurge: i giorni di ritenzione sono un parametro, non una
 // costante, cosi' si allargano dalla pagina Impostazioni senza ricompilare.
 async function getExpiredTrash(limit) {
@@ -283,7 +306,7 @@ module.exports = {
     saveHashes: duplicates.saveHashes,
     getDuplicateStats: duplicates.getStats,
     // cestino
-    getExpiredTrash,
+    trashMedia, getExpiredTrash,
     getPendingTrash: trash.getPendingTrash,
     completeTrash: trash.completeTrash,
     completePurge: trash.completePurge,

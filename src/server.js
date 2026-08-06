@@ -281,6 +281,20 @@ fastify.register((instance, opts, done) => {
         return await db.getTrash(req.query.status || null, limit, offset);
     });
 
+    // Cestina media scelti a mano dalla griglia. Accoda soltanto: a spostare i
+    // file e' il pod scan, e il job trashapply parte entro il quarto d'ora.
+    instance.post('/trash', async (req, reply) => {
+        const ids = (req.body || {}).media_ids;
+        if (!Array.isArray(ids) || ids.length === 0) {
+            return reply.status(400).send({ error: 'serve media_ids[]' });
+        }
+        const clean = ids.map((id) => utils.toInt(id, null)).filter((id) => id !== null);
+        if (clean.length === 0) {
+            return reply.status(400).send({ error: 'media_ids[] non contiene id validi' });
+        }
+        return await db.trashMedia(clean);
+    });
+
     instance.get('/trash/stats', async () => {
         return await db.getTrashStats();
     });
