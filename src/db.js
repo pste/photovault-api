@@ -52,13 +52,20 @@ async function browseFolder(folder_id, root_id, limit, offset) {
     const subfolders = await folders.getSubfolders(rootId, folder.folder_id);
     const breadcrumb = await folders.getBreadcrumb(rootId, folder.path);
 
-    // Anteprime: una query sola per tutte le sottocartelle, non una per tile.
+    // Anteprime e conteggi: una query sola per tutte le sottocartelle, non una
+    // per tile. I conteggi si calcolano qui e non da colonne denormalizzate,
+    // cosi' non esiste un intervallo in cui il numero mostrato e' vecchio.
     const ids = subfolders.map((f) => f.folder_id);
     const previews = await folders.getFolderPreviews(ids, FOLDER_PREVIEWS);
+    const counts = await folders.getFolderCounts(ids);
     for (const sub of subfolders) {
         sub.previews = previews
             .filter((p) => p.folder_id === sub.folder_id)
             .map((p) => ({ media_id: p.media_id, v: Math.floor(new Date(p.updated).getTime() / 1000) }));
+
+        const row = counts.find((c) => c.folder_id === sub.folder_id);
+        sub.media_count = row ? Number(row.media_count) : 0;
+        sub.sub_count = row ? Number(row.sub_count) : 0;
     }
 
     const items = await media.getMediaInFolder(folder.folder_id, limit, offset);
@@ -153,7 +160,6 @@ async function reconcileScan(root_id, scanStartedAt) {
     }
 
     const missing = await media.markMissing(root_id, scanStartedAt);
-    await folders.refreshCounts(root_id);
     await roots.closeScan(root_id, seen);
 
     logger.info({ root_id, seen, missing }, 'reconcile completato');

@@ -26,7 +26,7 @@ async function getSubfolders(root_id, parent_id) {
     const client = await pool.connect();
     try {
         const stm = `
-            SELECT folder_id, root_id, parent_id, "name", "path", depth, media_count, sub_count
+            SELECT folder_id, root_id, parent_id, "name", "path", depth
             FROM folders
             WHERE root_id = $1
               AND parent_id IS NOT DISTINCT FROM $2
@@ -38,6 +38,44 @@ async function getSubfolders(root_id, parent_id) {
     }
     catch(err) {
         dblog.createLog('ERROR DB getSubfolders', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
+// Conteggi di una lista di cartelle, calcolati al momento.
+//
+// Erano due colonne denormalizzate su folders, aggiornate a fine scansione: il
+// numero restava quindi falso per tutta la durata dello scan, e per sempre se
+// lo scan falliva prima del reconcile -- una cartella con 11.807 foto dentro
+// mostrava "vuota". Misurato sull'archivio vero (132k media, 1.730 cartelle):
+// 2,9 ms sulla cartella con piu' sottocartelle che esista in archivio, cioe'
+// meno della query delle anteprime che sta nella stessa richiesta.
+//
+// Le sottoquery correlate non sono piu' lente della GROUP BY equivalente --
+// misurate entrambe -- e dicono a colpo d'occhio cosa contano.
+async function getFolderCounts(folder_ids) {
+    if (!folder_ids || folder_ids.length === 0) {
+        return [];
+    }
+    const client = await pool.connect();
+    try {
+        const stm = `
+            SELECT f.folder_id,
+                   (SELECT count(*) FROM media m
+                     WHERE m.folder_id = f.folder_id AND m.missing_since IS NULL) AS media_count,
+                   (SELECT count(*) FROM folders s
+                     WHERE s.parent_id = f.folder_id AND s.missing_since IS NULL) AS sub_count
+            FROM folders f
+            WHERE f.folder_id = ANY($1)`;
+        logger.trace('DB: getFolderCounts');
+        const res = await client.query(stm, [folder_ids]);
+        return res.rows;
+    }
+    catch(err) {
+        dblog.createLog('ERROR DB getFolderCounts', err);
         throw err;
     }
     finally {
@@ -158,50 +196,7 @@ async function upsertFolder(root_id, parent_id, name, folderPath, depth) {
     }
 }
 
-// Ricalcolo dei contatori denormalizzati, a fine scansione.
-// Si fa qui e non con dei trigger: i trigger sono flusso di controllo nascosto,
-// e senza i contatori la navigazione farebbe un COUNT(*) per ogni sottocartella.
-async function refreshCounts(root_id) {
-    const client = await pool.connect();
-    try {
-        logger.trace({ root_id }, 'DB: refreshCounts');
-        await client.query('BEGIN');
-
-        await client.query(`
-            UPDATE folders f SET media_count = COALESCE(c.n, 0)
-            FROM (
-                SELECT fo.folder_id, count(m.media_id) AS n
-                FROM folders fo
-                LEFT JOIN media m ON m.folder_id = fo.folder_id AND m.missing_since IS NULL
-                WHERE fo.root_id = $1
-                GROUP BY fo.folder_id
-            ) c
-            WHERE f.folder_id = c.folder_id`, [root_id]);
-
-        await client.query(`
-            UPDATE folders f SET sub_count = COALESCE(c.n, 0)
-            FROM (
-                SELECT fo.folder_id, count(s.folder_id) AS n
-                FROM folders fo
-                LEFT JOIN folders s ON s.parent_id = fo.folder_id AND s.missing_since IS NULL
-                WHERE fo.root_id = $1
-                GROUP BY fo.folder_id
-            ) c
-            WHERE f.folder_id = c.folder_id`, [root_id]);
-
-        await client.query('COMMIT');
-    }
-    catch(err) {
-        await client.query('ROLLBACK');
-        dblog.createLog('ERROR DB refreshCounts', err);
-        throw err;
-    }
-    finally {
-        client.release();
-    }
-}
-
 module.exports = {
     getFolder, getFolderByPath, getSubfolders, getBreadcrumb, getFolderPreviews,
-    upsertFolder, refreshCounts,
+    getFolderCounts, upsertFolder,
 };
