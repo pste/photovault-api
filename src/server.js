@@ -494,6 +494,16 @@ fastify.register((instance, opts, done) => {
         }
     });
 
+    // Esito del job dei luoghi: tag e chiusura della coda in una chiamata sola.
+    instance.post('/place/batch', async (req, reply) => {
+        const items = (req.body || {}).items;
+        if (!Array.isArray(items)) {
+            return reply.status(400).send({ error: 'serve items[]' });
+        }
+        const count = await db.applyPlaces(items);
+        return { count };
+    });
+
     instance.post('/thumb/batch', async (req, reply) => {
         const items = (req.body || {}).items;
         if (!Array.isArray(items)) {

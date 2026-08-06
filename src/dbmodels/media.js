@@ -299,6 +299,9 @@ async function markMissing(root_id, since) {
 async function getPending(stage, limit) {
     const conditions = {
         thumb: "m.thumb_status = 'pending'",
+        // I luoghi non dipendono dalle thumbnail: si ricavano dal GPS EXIF o
+        // dal nome della cartella, quindi la loro coda e' solo place_status.
+        place: "m.place_status = 'pending'",
         label: "m.label_status = 'pending' AND m.thumb_status = 'done'",
         hash:  'm.content_hash IS NULL',
         dhash: "m.dhash IS NULL AND m.thumb_status = 'done' AND m.media_kind <> 'video'",
@@ -316,7 +319,8 @@ async function getPending(stage, limit) {
             -- questa colonna le foto verticali diventerebbero thumbnail storte,
             -- marcate 'done' e mai piu' rigenerate.
             SELECT m.media_id, m.file_name, m.media_kind, m.ext, m.file_size,
-                   m.orientation, f."path" AS folder_path, r.rel_path
+                   m.orientation, m.gps_lat, m.gps_lon,
+                   f."path" AS folder_path, r.rel_path
             FROM media m
             JOIN folders f ON f.folder_id = m.folder_id
             JOIN roots r ON r.root_id = f.root_id
@@ -364,6 +368,11 @@ async function setThumbResults(items) {
                 camera_model = COALESCE($9, camera_model),
                 gps_lat      = COALESCE($10, gps_lat),
                 gps_lon      = COALESCE($11, gps_lon),
+                -- Le coordinate arrivano qui, non dallo scan: se questa foto
+                -- era gia' passata dai luoghi lo aveva fatto senza GPS, quindi
+                -- va rimessa in coda. Senza, una foto etichettata prima della
+                -- sua thumbnail non avrebbe mai il suo toponimo.
+                place_status = CASE WHEN $10 IS NOT NULL THEN 'pending' ELSE place_status END,
                 updated = NOW()
             WHERE media_id = $1`;
         for (const item of items) {
@@ -385,6 +394,34 @@ async function setThumbResults(items) {
     catch(err) {
         await client.query('ROLLBACK');
         dblog.createLog('ERROR DB setThumbResults', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
+// Esito del job dei luoghi. I tag li applica db.applyTags: qui si chiude solo
+// la coda, perche' un media senza GPS e senza toponimo nel percorso e' comunque
+// stato esaminato e non deve tornare in fila a ogni giro.
+async function setPlaceResults(items) {
+    if (!items || items.length === 0) {
+        return 0;
+    }
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        for (const item of items) {
+            await client.query('UPDATE media SET place_status = $2 WHERE media_id = $1',
+                               [item.media_id, item.place_status || 'done']);
+        }
+        await client.query('COMMIT');
+        logger.trace({ rows: items.length }, 'DB: setPlaceResults');
+        return items.length;
+    }
+    catch(err) {
+        await client.query('ROLLBACK');
+        dblog.createLog('ERROR DB setPlaceResults', err);
         throw err;
     }
     finally {
@@ -421,5 +458,5 @@ module.exports = {
     getMedia, getMediaInFolder, countMediaInFolder,
     search, countSearch,
     upsertMediaBatch, countSeenSince, markMissing,
-    getPending, setThumbResults, getStats,
+    getPending, setThumbResults, setPlaceResults, getStats,
 };

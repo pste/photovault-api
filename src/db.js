@@ -140,6 +140,19 @@ async function ingestOthers(items) {
     return await others.upsertBatch(items);
 }
 
+// Risultato del job dei luoghi: i tag di ogni media e la chiusura della coda.
+//
+// I tag arrivano per nome, non per id, come quelli di CLIP: il vocabolario dei
+// toponimi vive in photovault-label -- e' GeoNames -- non in questo database.
+async function applyPlaces(items) {
+    for (const item of items) {
+        if (item.tags && item.tags.length > 0) {
+            await applyTags(item.media_id, item.tags, item.source || 'geo');
+        }
+    }
+    return await media.setPlaceResults(items);
+}
+
 // Perche' il guard: una share CIFS irraggiungibile, o montata a meta', restituisce
 // una directory vuota. A livello di syscall e' indistinguibile da "l'utente ha
 // cancellato tutte le foto". Senza questo controllo un solo mount ballerino
@@ -341,6 +354,8 @@ module.exports = {
     registerFolder, ingestMedia, ingestOthers, reconcileScan,
     getPending: media.getPending,
     setThumbResults: media.setThumbResults,
+    setPlaceResults: media.setPlaceResults,
+    applyPlaces,
     upsertRoot: roots.upsertRoot,
     // tag
     applyTags,
