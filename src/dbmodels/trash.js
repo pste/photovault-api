@@ -66,12 +66,75 @@ async function requestTrashOther(other_id) {
     }
 }
 
+// Cestina una cartella intera: una sola riga di trash, che rappresenta una
+// rename dell'intera cartella. Il conteggio e la dimensione sono quelli
+// dell'INTERO sottoalbero, perche' e' quello che si muove.
+async function requestTrashFolder(folder_id) {
+    const client = await pool.connect();
+    try {
+        const stm = `
+            INSERT INTO trash (folder_id, root_id, original_path, trash_path,
+                               file_size, file_count)
+            SELECT f.folder_id,
+                   f.root_id,
+                   f."path",
+                   '.photovault/trash/' || to_char(NOW(), 'YYYYMMDD') || '/'
+                       || f.folder_id || '_' || f."name",
+                   COALESCE(sub.bytes, 0),
+                   COALESCE(sub.files, 0)
+            FROM folders f
+            LEFT JOIN LATERAL (
+                SELECT count(*)::int AS files, COALESCE(sum(m.file_size), 0)::bigint AS bytes
+                FROM media m
+                JOIN folders d ON d.folder_id = m.folder_id
+                WHERE d.root_id = f.root_id AND d."path" LIKE f."path" || '%'
+            ) sub ON true
+            WHERE f.folder_id = $1
+              AND f."path" <> ''
+            RETURNING *`;
+        logger.trace({ folder_id }, 'DB: requestTrashFolder');
+        const res = await client.query(stm, [folder_id]);
+        return res.rows[0] || null;
+    }
+    catch(err) {
+        dblog.createLog('ERROR DB requestTrashFolder', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
+// I media contenuti in una cartella e in tutte le sue discendenti. Serve al pod
+// scan per togliere le thumbnail: la rename porta via gli originali, ma le
+// anteprime vivono in .photovault/thumbs/ e resterebbero orfane.
+async function getFolderMediaIds(folder_id) {
+    const client = await pool.connect();
+    try {
+        const stm = `
+            SELECT m.media_id
+            FROM folders f
+            JOIN folders d ON d.root_id = f.root_id AND d."path" LIKE f."path" || '%'
+            JOIN media m ON m.folder_id = d.folder_id
+            WHERE f.folder_id = $1`;
+        const res = await client.query(stm, [folder_id]);
+        return res.rows.map((r) => r.media_id);
+    }
+    catch(err) {
+        dblog.createLog('ERROR DB getFolderMediaIds', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
 // Coda del job trashapply: file da spostare.
 async function getPendingTrash(limit) {
     const client = await pool.connect();
     try {
         const stm = `
-            SELECT t.trash_id, t.media_id, t.original_path, t.trash_path, r.rel_path
+            SELECT t.trash_id, t.media_id, t.folder_id, t.original_path, t.trash_path, r.rel_path
             FROM trash t
             JOIN roots r ON r.root_id = t.root_id
             WHERE t."status" = 'pending'
@@ -99,7 +162,7 @@ async function completeTrash(trash_id, status, result) {
         await client.query('BEGIN');
         const res = await client.query(
             `UPDATE trash SET "status" = $2, executed = NOW(), "result" = $3
-             WHERE trash_id = $1 RETURNING media_id, other_id`,
+             WHERE trash_id = $1 RETURNING media_id, other_id, folder_id`,
             [trash_id, status, result || null]);
 
         // Una riga di cestino viene da media oppure da other_files, mai da
@@ -110,6 +173,25 @@ async function completeTrash(trash_id, status, result) {
             }
             if (res.rows[0].other_id) {
                 await client.query('DELETE FROM other_files WHERE other_id = $1', [res.rows[0].other_id]);
+            }
+            // Una cartella spostata porta via il suo intero sottoalbero: prima i
+            // media (la cascade si occupa di tag, embedding e appartenenze),
+            // poi i file non gestiti, infine le cartelle stesse. L'ordine e'
+            // obbligato dalla foreign key media -> folders.
+            if (res.rows[0].folder_id) {
+                const sub = `
+                    SELECT d.folder_id, d.root_id, d."path"
+                    FROM folders f
+                    JOIN folders d ON d.root_id = f.root_id AND d."path" LIKE f."path" || '%'
+                    WHERE f.folder_id = $1`;
+                await client.query(`DELETE FROM media WHERE folder_id IN (SELECT folder_id FROM (${sub}) s)`,
+                                   [res.rows[0].folder_id]);
+                await client.query(`DELETE FROM other_files o
+                                    WHERE EXISTS (SELECT 1 FROM (${sub}) s
+                                                  WHERE s.root_id = o.root_id AND s."path" = o."path")`,
+                                   [res.rows[0].folder_id]);
+                await client.query(`DELETE FROM folders WHERE folder_id IN (SELECT folder_id FROM (${sub}) s)`,
+                                   [res.rows[0].folder_id]);
             }
         }
         await client.query('COMMIT');
@@ -217,6 +299,7 @@ async function getTrashStats() {
 }
 
 module.exports = {
-    requestTrash, requestTrashOther, getPendingTrash, completeTrash,
+    requestTrash, requestTrashOther, requestTrashFolder, getFolderMediaIds,
+    getPendingTrash, completeTrash,
     getExpiredTrash, completePurge, getTrash, getTrashStats,
 };

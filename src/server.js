@@ -117,6 +117,18 @@ fastify.register((instance, opts, done) => {
         return data;
     });
 
+    // Cosa e' rimasto dentro una cartella. La UI la interroga dopo aver
+    // cestinato dei media, per proporre di togliere anche la cartella se non
+    // resta piu' niente -- ne' media, ne' file estranei, ne' sottocartelle.
+    instance.get('/folders/:id/contents', async (req, reply) => {
+        const folder_id = utils.toInt(req.params.id, null);
+        const data = await db.getFolderContents(folder_id);
+        if (!data) {
+            return reply.status(404).send({ error: 'cartella non trovata' });
+        }
+        return data;
+    });
+
     instance.get('/media/:id', async (req, reply) => {
         const media_id = utils.toInt(req.params.id, null);
         const item = await db.getMediaDetail(media_id);
@@ -307,10 +319,16 @@ fastify.register((instance, opts, done) => {
 
         const media_ids = ids(body.media_ids);
         const other_ids = ids(body.other_ids);
-        if (media_ids.length === 0 && other_ids.length === 0) {
-            return reply.status(400).send({ error: 'serve media_ids[] oppure other_ids[]' });
+        const folder_ids = ids(body.folder_ids);
+        if (media_ids.length === 0 && other_ids.length === 0 && folder_ids.length === 0) {
+            return reply.status(400).send({ error: 'serve media_ids[], other_ids[] oppure folder_ids[]' });
         }
-        return await db.trashMedia(media_ids, other_ids);
+
+        // Le cartelle si cestinano per prime: cosi' i media che stanno dentro
+        // una cartella cestinata non generano anche una riga per file.
+        const cartelle = await db.trashFolders(folder_ids);
+        const files = await db.trashMedia(media_ids, other_ids);
+        return { ...files, ...cartelle };
     });
 
     instance.get('/trash/stats', async () => {

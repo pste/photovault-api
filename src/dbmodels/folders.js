@@ -2,7 +2,7 @@ const logger = require('../logger');
 const dblog = require('./logs');
 const pool = require('./dbpool');
 const utils = require('../utils');
-const { NOT_TRASHED_MEDIA } = require('./sqlparts');
+const { NOT_TRASHED_MEDIA, NOT_TRASHED_OTHER, NOT_TRASHED_FOLDER } = require('./sqlparts');
 
 async function getFolder(folder_id) {
     const client = await pool.connect();
@@ -27,12 +27,13 @@ async function getSubfolders(root_id, parent_id) {
     const client = await pool.connect();
     try {
         const stm = `
-            SELECT folder_id, root_id, parent_id, "name", "path", depth
-            FROM folders
-            WHERE root_id = $1
-              AND parent_id IS NOT DISTINCT FROM $2
-              AND missing_since IS NULL
-            ORDER BY "name"`;
+            SELECT f.folder_id, f.root_id, f.parent_id, f."name", f."path", f.depth
+            FROM folders f
+            WHERE f.root_id = $1
+              AND f.parent_id IS NOT DISTINCT FROM $2
+              AND f.missing_since IS NULL
+              AND ${NOT_TRASHED_FOLDER('f')}
+            ORDER BY f."name"`;
         logger.trace({ root_id, parent_id }, 'DB: getSubfolders');
         const res = await client.query(stm, [root_id, parent_id]);
         return res.rows;
@@ -78,6 +79,39 @@ async function getFolderCounts(folder_ids) {
     }
     catch(err) {
         dblog.createLog('ERROR DB getFolderCounts', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
+// Cosa contiene una cartella, per decidere se e' rimasta vuota: media diretti,
+// file non gestiti e sottocartelle. Tutto al netto di cio' che e' gia' in coda
+// di cestinamento, altrimenti una cartella appena svuotata risulterebbe piena.
+async function getContents(folder_id) {
+    const client = await pool.connect();
+    try {
+        const stm = `
+            SELECT
+                (SELECT count(*)::int FROM media m
+                  WHERE m.folder_id = f.folder_id AND m.missing_since IS NULL
+                    AND ${NOT_TRASHED_MEDIA('m')}) AS media,
+                (SELECT count(*)::int FROM other_files o
+                  WHERE o.root_id = f.root_id AND o."path" = f."path"
+                    AND o.missing_since IS NULL
+                    AND ${NOT_TRASHED_OTHER('o')}) AS others,
+                (SELECT count(*)::int FROM folders s
+                  WHERE s.parent_id = f.folder_id AND s.missing_since IS NULL
+                    AND ${NOT_TRASHED_FOLDER('s')}) AS subfolders
+            FROM folders f
+            WHERE f.folder_id = $1`;
+        logger.trace({ folder_id }, 'DB: getContents');
+        const res = await client.query(stm, [folder_id]);
+        return res.rows[0] || null;
+    }
+    catch(err) {
+        dblog.createLog('ERROR DB getContents', err);
         throw err;
     }
     finally {
@@ -201,5 +235,5 @@ async function upsertFolder(root_id, parent_id, name, folderPath, depth) {
 
 module.exports = {
     getFolder, getFolderByPath, getSubfolders, getBreadcrumb, getFolderPreviews,
-    getFolderCounts, upsertFolder,
+    getFolderCounts, getContents, upsertFolder,
 };

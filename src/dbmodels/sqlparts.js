@@ -18,4 +18,14 @@ const NOT_TRASHED_OTHER = (alias) => `NOT EXISTS (
     SELECT 1 FROM trash tr
     WHERE tr.other_id = ${alias}.other_id AND tr."status" = 'pending')`;
 
-module.exports = { NOT_TRASHED_MEDIA, NOT_TRASHED_OTHER };
+// Una cartella e' "in cestino" anche quando lo e' un suo antenato: la rename
+// sposta l'intero sottoalbero, quindi mostrare una sottocartella di una
+// cartella cestinata sarebbe mostrare qualcosa che sul disco non c'e' piu'.
+const NOT_TRASHED_FOLDER = (alias) => `NOT EXISTS (
+    SELECT 1 FROM trash tr
+    JOIN folders tf ON tf.folder_id = tr.folder_id
+    WHERE tr."status" = 'pending'
+      AND tf.root_id = ${alias}.root_id
+      AND ${alias}."path" LIKE tf."path" || '%')`;
+
+module.exports = { NOT_TRASHED_MEDIA, NOT_TRASHED_OTHER, NOT_TRASHED_FOLDER };

@@ -269,6 +269,40 @@ async function resolveDuplicateGroup(dup_group_id, keep_media_id, action) {
 // Un media gia' in cestino non viene accodato due volte -- requestTrash
 // restituisce null -- cosi' un doppio clic sul pulsante non genera due
 // spostamenti dello stesso file.
+// Le cartelle in coda portano con se' l'elenco dei media che contengono: il pod
+// scan deve togliere le loro thumbnail, che vivono in .photovault/thumbs/ e non
+// si spostano con la rename della cartella.
+async function getPendingTrash(limit) {
+    const rows = await trash.getPendingTrash(limit);
+    for (const row of rows) {
+        if (row.folder_id) {
+            row.thumb_media_ids = await trash.getFolderMediaIds(row.folder_id);
+        }
+    }
+    return rows;
+}
+
+// Quanto c'e' dentro una cartella, escluso cio' che e' gia' in coda di
+// cestinamento. Serve alla UI per proporre di togliere la cartella quando si
+// svuota: si propone solo se non resta davvero niente.
+async function getFolderContents(folder_id) {
+    return await folders.getContents(folder_id);
+}
+
+async function trashFolders(folder_ids) {
+    let queued = 0;
+    for (const folder_id of folder_ids || []) {
+        const row = await trash.requestTrashFolder(folder_id);
+        if (row) {
+            queued++;
+        }
+    }
+    if (queued > 0) {
+        await jobs.upsertPendingJob('trashapply', new Date());
+    }
+    return { cestinate: queued };
+}
+
 async function trashMedia(media_ids, other_ids) {
     let queued = 0;
     for (const media_id of media_ids || []) {
@@ -329,8 +363,8 @@ module.exports = {
     countOthers: others.countOthers,
     getOthersStats: others.getStats,
     // cestino
-    trashMedia, getExpiredTrash,
-    getPendingTrash: trash.getPendingTrash,
+    trashMedia, trashFolders, getFolderContents, getExpiredTrash,
+    getPendingTrash,
     completeTrash: trash.completeTrash,
     completePurge: trash.completePurge,
     getTrash: trash.getTrash,
