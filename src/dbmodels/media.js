@@ -205,7 +205,16 @@ async function upsertMediaBatch(items) {
                 height        = COALESCE(EXCLUDED.height, media.height),
                 duration_s    = COALESCE(EXCLUDED.duration_s, media.duration_s),
                 orientation   = COALESCE(EXCLUDED.orientation, media.orientation),
-                capture_ts    = COALESCE(EXCLUDED.capture_ts, media.capture_ts),
+                -- capture_ts NON segue il COALESCE delle altre: lo scan la manda
+                -- sempre valorizzata con l'mtime, quindi un COALESCE su
+                -- EXCLUDED sostituirebbe la data EXIF gia' in archivio con la
+                -- data di modifica del file -- e, non essendo il file cambiato,
+                -- thumb_status resterebbe 'done' e nessuno rileggerebbe piu'
+                -- l'EXIF. Su un file cambiato invece il ripiego e' corretto: la
+                -- pipeline riparte da 'pending' e thumbs raffinera' il valore.
+                capture_ts    = CASE WHEN ${IS_CHANGED}
+                                     THEN EXCLUDED.capture_ts
+                                     ELSE COALESCE(media.capture_ts, EXCLUDED.capture_ts) END,
                 camera_make   = COALESCE(EXCLUDED.camera_make, media.camera_make),
                 camera_model  = COALESCE(EXCLUDED.camera_model, media.camera_model),
                 gps_lat       = COALESCE(EXCLUDED.gps_lat, media.gps_lat),
