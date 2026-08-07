@@ -432,16 +432,41 @@ async function setPlaceResults(items) {
 async function getStats() {
     const client = await pool.connect();
     try {
+        // Per ogni fase servono tutti e tre i numeri, non solo "quanti mancano":
+        // una barra che si ferma al 98% e non arriva mai a 100 e' incomprensibile
+        // finche' non si vede che il resto e' in errore, non in coda.
         const stm = `
             SELECT
                 count(*)::int AS media_total,
                 count(*) FILTER (WHERE media_kind = 'video')::int AS videos,
-                count(*) FILTER (WHERE missing_since IS NOT NULL)::int AS missing,
+                count(*) FILTER (WHERE media_kind <> 'video')::int AS images,
+
+                -- Fuori dal WHERE qui sotto, altrimenti sarebbe sempre zero.
+                (SELECT count(*) FROM media WHERE missing_since IS NOT NULL)::int AS missing,
+
                 count(*) FILTER (WHERE thumb_status = 'pending')::int AS thumb_pending,
+                count(*) FILTER (WHERE thumb_status = 'done')::int    AS thumb_done,
+                count(*) FILTER (WHERE thumb_status NOT IN ('pending', 'done'))::int AS thumb_error,
+
+                count(*) FILTER (WHERE place_status = 'pending')::int AS place_pending,
+                count(*) FILTER (WHERE place_status = 'done')::int    AS place_done,
+
                 count(*) FILTER (WHERE label_status = 'pending')::int AS label_pending,
-                count(*) FILTER (WHERE content_hash IS NULL)::int AS hash_pending,
+                count(*) FILTER (WHERE label_status = 'done')::int    AS label_done,
+
+                count(*) FILTER (WHERE content_hash IS NULL)::int     AS hash_pending,
+                count(*) FILTER (WHERE content_hash IS NOT NULL)::int AS hash_done,
+
+                -- Il dHash riguarda le sole immagini, e solo quelle con
+                -- l'anteprima gia' fatta: e' dalla thumbnail che si calcola.
+                count(*) FILTER (WHERE media_kind <> 'video' AND dhash IS NOT NULL)::int AS dhash_done,
+                count(*) FILTER (WHERE media_kind <> 'video')::int AS dhash_total,
+
                 COALESCE(sum(file_size), 0)::bigint AS bytes_total
-            FROM media`;
+            FROM media
+            -- I file spariti dalla share restano in archivio ma non sono in
+            -- nessuna coda: contarli renderebbe le barre incompletabili.
+            WHERE missing_since IS NULL`;
         const res = await client.query(stm);
         return res.rows[0];
     }
