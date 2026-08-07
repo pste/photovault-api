@@ -213,7 +213,11 @@ async function getExpiredTrash(retentionDays, limit) {
     const client = await pool.connect();
     try {
         const stm = `
-            SELECT t.trash_id, t.trash_path, t.file_size, r.rel_path
+            -- media_id serve al pod per togliere la thumbnail, che resta sulla
+            -- share per tutta la ritenzione: e' quella che la pagina Cestino
+            -- mostra accanto alla riga. La colonna sopravvive alla cancellazione
+            -- della riga media, perche' non ha una foreign key.
+            SELECT t.trash_id, t.trash_path, t.file_size, t.media_id, r.rel_path
             FROM trash t
             JOIN roots r ON r.root_id = t.root_id
             WHERE t."status" = 'done'
