@@ -75,23 +75,46 @@ qualsiasi altra cosa.
 
 ## Rotte principali
 
-Aperte:
+Elenco derivato dal codice, non scritto a mano: 35 rotte aperte e 22 interne.
+
+Aperte, sotto `/api`:
 
 ```
-GET    /api/health
-GET    /api/health/storage                  stato della share, alimenta il banner in UI
-GET    /api/stats
-GET    /api/browse/roots
-GET    /api/browse/folder?folder=|root=     breadcrumb + sottocartelle + media paginati
-GET    /api/media/:id                       dettaglio, EXIF, tag
-GET    /api/thumb/:id/:size?v=<updated>     size = s | m
-GET    /api/media/:id/original              stream con supporto Range
-GET    /api/search?q=&kind=&from=&to=&tag=&path=
-GET    /api/tags
-POST   /api/media/:id/tags                  { add: [...], remove: [...] }
-GET    /api/jobs   POST /api/jobs   DELETE /api/jobs/:id
-GET    /api/parameters   POST /api/parameters
-GET    /api/logs
+GET    /health
+GET    /health/storage                      stato della share, alimenta il banner in UI
+GET    /stats                               contatori e avanzamento di ogni fase, per la pagina Stats
+GET    /browse/roots
+GET    /browse/folder?folder=|root=         breadcrumb + sottocartelle + media paginati
+GET    /folders/:id/contents
+GET    /media/:id                           dettaglio, EXIF, tag
+GET    /thumb/:id/:size?v=<updated>         size = s | m
+GET    /media/:id/original                  stream con supporto Range
+GET    /search?q=&kind=&from=&to=&tag=&path=
+
+GET    /tags                                elenco con conteggio, per i filtri
+GET    /tags/manage?kind=&q=&blocked=       elenco con conteggio, sorgenti e blocco
+GET    /tags/kinds
+PATCH  /tags/:id                            { display_name, kind, blocked }
+POST   /tags/:id/merge                      { into }
+POST   /tags/:id/clear                      toglie le assegnazioni e blocca
+POST   /media/:id/tags                      { add: [...], remove: [...] }
+
+GET    /others?ext=&sort=                   file che photovault non gestisce
+GET    /others/stats
+GET    /others/:id/download                 attachment, con Range
+
+GET    /livephotos                          coppie foto/video
+POST   /livephotos/trash-videos             cestina i video e tiene le foto
+
+GET    /duplicates?status=&kind=   GET /duplicates/:id   GET /duplicates/stats
+POST   /duplicates/:id/resolve
+
+GET    /trash?status=   GET /trash/stats
+POST   /trash                               { media_ids, other_ids, folder_ids }
+
+GET    /jobs   POST /jobs   DELETE /jobs/:id
+GET    /parameters   POST /parameters
+GET    /logs
 ```
 
 Tutte le rotte paginate accettano `page` e `size` (default 200, massimo 500).
@@ -102,18 +125,28 @@ Protette da bearer token, sotto `/api/internal`:
 POST   /jobs/claim              { names: [...] }  ← il filtro per nome è obbligatorio
 PATCH  /jobs/:id                { status, result }
 POST   /jobs                    riaccodamento da parte del cron
+POST   /jobs/:id/heartbeat      409 se il job non è più `running`: il pod deve fermarsi
 GET    /parameters
+
 GET    /scan/roots
 POST   /scan/root               { name, rel_path }
 POST   /scan/folder             { root_id, path }  → risolve l'intera catena di antenati
 POST   /scan/media/batch        { items: [...] }   → upsert idempotente
+POST   /scan/other/batch        { items: [...] }   → file non gestiti
 POST   /scan/reconcile          { root_id, started_at }  → applica il guard del 90%
-GET    /pending/:stage          stage = thumb | label | hash | dhash
-POST   /thumb/batch             { items: [{ media_id, thumb_status, width, height }] }
-```
 
-Da aggiungere nelle fasi successive: `/dedup/hashes`, `/dedup/rebuild`, `/label/batch`,
-`/trash/pending`, `/trash/:id/done`, e le rotte aperte `/api/duplicates`.
+GET    /pending/:stage          stage = thumb | place | label | hash | dhash
+POST   /thumb/batch             { items: [{ media_id, thumb_status, ...metadati }] }
+POST   /place/batch             { items: [...] }   → tag di luogo e chiusura della coda
+POST   /media/not-media         { media_ids }      → sposta fra i file non gestiti
+POST   /livephotos/pair         ricalcola gli accoppiamenti Live Photo
+
+POST   /dedup/hashes            { items: [...] }
+POST   /dedup/rebuild           raggruppamento + union-find
+
+GET    /trash/pending   GET /trash/expired
+POST   /trash/:id/done   POST /trash/:id/purged
+```
 
 ## Come lo scan rileva le modifiche
 
