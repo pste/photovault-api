@@ -142,6 +142,26 @@ async function countOthers(ext) {
     }
 }
 
+// Un singolo file non gestito, con la radice che serve a costruirne il percorso.
+async function getDetail(other_id) {
+    const client = await pool.connect();
+    try {
+        const res = await client.query(`
+            SELECT o.other_id, o."path", o.file_name, o.ext, o.file_size, r.rel_path
+            FROM other_files o
+            JOIN roots r ON r.root_id = o.root_id
+            WHERE o.other_id = $1`, [other_id]);
+        return res.rows[0] || null;
+    }
+    catch(err) {
+        dblog.createLog('ERROR DB others.getDetail', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
 // Sposta dei media fra i file non gestiti: la riga esce da media ed entra in
 // other_files, conservando percorso, dimensione e data.
 //
@@ -211,4 +231,6 @@ async function markNotMedia(mediaIds) {
     }
 }
 
-module.exports = { upsertBatch, markMissing, getOthers, countOthers, getStats, markNotMedia };
+module.exports = {
+    upsertBatch, markMissing, getOthers, countOthers, getStats, markNotMedia, getDetail,
+};

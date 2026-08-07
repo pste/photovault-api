@@ -46,6 +46,58 @@ function paging(query) {
 //
 // fsp.open e' asincrona e usa il threadpool: a differenza di statSync, contro un
 // mount CIFS bloccato non ferma l'event loop.
+// Streaming di un file della share, con supporto Range.
+//
+// Condiviso da media e file non gestiti: sono la stessa operazione, e il Range
+// serve a entrambi -- un video si apre a meta', e fra i file non gestiti ci sono
+// ISO da 27 GB che nessuno vuole riscaricare da capo dopo un'interruzione.
+async function sendOriginal(req, reply, filePath) {
+    if (!paths.isInsideRoot(filePath)) {
+        return reply.status(400).send({ error: 'percorso non valido' });
+    }
+
+    // Un solo file handle per stat e stream: l'esito e' noto prima di iniziare
+    // a rispondere (vedi la nota in sendFile), e non c'e' finestra tra il
+    // controllo e l'apertura in cui il file possa sparire.
+    let handle = null;
+    let stat = null;
+    try {
+        handle = await fsp.open(filePath, 'r');
+        stat = await handle.stat();
+    }
+    catch(err) {
+        if (handle) {
+            await handle.close();
+        }
+        const code = (err.code === 'ENOENT') ? 404 : 503;
+        return reply.status(code).send({ error: 'file non leggibile' });
+    }
+
+    reply.header('Accept-Ranges', 'bytes');
+    reply.header('Cache-Control', 'private, max-age=3600');
+
+    const range = req.headers.range;
+    if (range) {
+        const match = /bytes=(\d*)-(\d*)/.exec(range);
+        const start = (match && match[1]) ? parseInt(match[1], 10) : 0;
+        const end = (match && match[2]) ? parseInt(match[2], 10) : stat.size - 1;
+
+        if (start >= stat.size || end >= stat.size || start > end) {
+            await handle.close();
+            reply.header('Content-Range', `bytes */${stat.size}`);
+            return reply.status(416).send({ error: 'range non valido' });
+        }
+
+        reply.status(206);
+        reply.header('Content-Range', `bytes ${start}-${end}/${stat.size}`);
+        reply.header('Content-Length', end - start + 1);
+        return reply.send(handle.createReadStream({ start, end, autoClose: true }));
+    }
+
+    reply.header('Content-Length', stat.size);
+    return reply.send(handle.createReadStream({ autoClose: true }));
+}
+
 async function sendFile(reply, filePath, mimeType) {
     if (!paths.isInsideRoot(filePath)) {
         return reply.status(400).send({ error: 'percorso non valido' });
@@ -170,57 +222,27 @@ fastify.register((instance, opts, done) => {
 
     // Originale, con supporto Range: serve alla riproduzione video e al download.
     instance.get('/media/:id/original', async (req, reply) => {
-        const media_id = utils.toInt(req.params.id, null);
-        const item = await db.getMediaDetail(media_id);
+        const item = await db.getMediaDetail(utils.toInt(req.params.id, null));
         if (!item) {
             return reply.status(404).send({ error: 'media non trovato' });
         }
+        return sendOriginal(req, reply,
+            paths.originalPath(item.rel_path, item.folder_path, item.file_name));
+    });
 
-        const filePath = paths.originalPath(item.rel_path, item.folder_path, item.file_name);
-        if (!paths.isInsideRoot(filePath)) {
-            return reply.status(400).send({ error: 'percorso non valido' });
+    // Scaricare un file non gestito e' l'unico modo per sapere cosa sia: la
+    // pagina ne mostra percorso e dimensione, ma un .dat da 3 GB si giudica solo
+    // aprendolo. Content-Disposition attachment perche' il browser non provi a
+    // renderizzare qualcosa che non sa cos'e'.
+    instance.get('/others/:id/download', async (req, reply) => {
+        const item = await db.getOtherDetail(utils.toInt(req.params.id, null));
+        if (!item) {
+            return reply.status(404).send({ error: 'file non trovato' });
         }
-
-        // Un solo file handle per stat e stream: l'esito e' noto prima di
-        // iniziare a rispondere (vedi la nota in sendFile), e non c'e' finestra
-        // tra il controllo e l'apertura in cui il file possa sparire.
-        let handle = null;
-        let stat = null;
-        try {
-            handle = await fsp.open(filePath, 'r');
-            stat = await handle.stat();
-        }
-        catch(err) {
-            if (handle) {
-                await handle.close();
-            }
-            const code = (err.code === 'ENOENT') ? 404 : 503;
-            return reply.status(code).send({ error: 'file non leggibile' });
-        }
-
-        reply.header('Accept-Ranges', 'bytes');
-        reply.header('Cache-Control', 'private, max-age=3600');
-
-        const range = req.headers.range;
-        if (range) {
-            const match = /bytes=(\d*)-(\d*)/.exec(range);
-            const start = (match && match[1]) ? parseInt(match[1], 10) : 0;
-            const end = (match && match[2]) ? parseInt(match[2], 10) : stat.size - 1;
-
-            if (start >= stat.size || end >= stat.size || start > end) {
-                await handle.close();
-                reply.header('Content-Range', `bytes */${stat.size}`);
-                return reply.status(416).send({ error: 'range non valido' });
-            }
-
-            reply.status(206);
-            reply.header('Content-Range', `bytes ${start}-${end}/${stat.size}`);
-            reply.header('Content-Length', end - start + 1);
-            return reply.send(handle.createReadStream({ start, end, autoClose: true }));
-        }
-
-        reply.header('Content-Length', stat.size);
-        return reply.send(handle.createReadStream({ autoClose: true }));
+        reply.header('Content-Disposition',
+            `attachment; filename*=UTF-8''${encodeURIComponent(item.file_name)}`);
+        return sendOriginal(req, reply,
+            paths.originalPath(item.rel_path, item.path, item.file_name));
     });
 
     // ---------- tag ----------

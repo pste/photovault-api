@@ -384,6 +384,7 @@ module.exports = {
     countOthers: others.countOthers,
     getOthersStats: others.getStats,
     markNotMedia: others.markNotMedia,
+    getOtherDetail: others.getDetail,
     // cestino
     trashMedia, trashFolders, getFolderContents, getExpiredTrash,
     getPendingTrash,
