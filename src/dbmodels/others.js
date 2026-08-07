@@ -142,4 +142,73 @@ async function countOthers(ext) {
     }
 }
 
-module.exports = { upsertBatch, markMissing, getOthers, countOthers, getStats };
+// Sposta dei media fra i file non gestiti: la riga esce da media ed entra in
+// other_files, conservando percorso, dimensione e data.
+//
+// Serve perche' l'estensione mente. WhatsApp salva le note vocali in .3gp, che
+// e' un contenitore video e sta nell'allowlist perche' i telefoni vecchi ci
+// giravano i filmati veri: solo aprendo il file si scopre che dentro non c'e'
+// nessuna traccia video. Lasciarle in media significherebbe 98 riquadri rotti
+// nella griglia e un errore di anteprima che si ripresenta a ogni giro.
+//
+// Le tabelle collegate spariscono da sole: media_tags, media_embeddings e
+// dup_members hanno ON DELETE CASCADE.
+async function markNotMedia(mediaIds) {
+    if (!mediaIds || mediaIds.length === 0) {
+        return { moved: 0, kept: 0 };
+    }
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // Primo: tutte fuori dalla coda, comunque vada il resto. Se una riga
+        // restasse 'pending' il pod la ritroverebbe al giro dopo, la
+        // rispedirebbe qui e non uscirebbe mai dal ciclo.
+        await client.query(
+            `UPDATE media SET thumb_status = 'error', updated = NOW()
+             WHERE media_id = ANY($1) AND thumb_status = 'pending'`, [mediaIds]);
+
+        // Un media in attesa di cestinamento non si tocca: il cestino conosce
+        // il suo media_id, e cancellargli la riga sotto lascerebbe il job
+        // trashapply con un riferimento nel vuoto.
+        const movable = `
+            SELECT m.media_id, f.root_id, f."path", m.file_name, m.ext,
+                   m.file_size, m.modified
+            FROM media m
+            JOIN folders f ON f.folder_id = m.folder_id
+            WHERE m.media_id = ANY($1)
+              AND NOT EXISTS (SELECT 1 FROM trash tr WHERE tr.media_id = m.media_id)`;
+
+        const res = await client.query(`
+            WITH movable AS (${movable}),
+            inserted AS (
+                INSERT INTO other_files (root_id, "path", file_name, ext, file_size, modified)
+                SELECT root_id, "path", file_name, ext, file_size, modified FROM movable
+                ON CONFLICT (root_id, "path", file_name) DO UPDATE SET
+                    last_seen     = NOW(),
+                    missing_since = NULL,
+                    file_size     = EXCLUDED.file_size,
+                    modified      = EXCLUDED.modified
+            )
+            DELETE FROM media WHERE media_id IN (SELECT media_id FROM movable)`, [mediaIds]);
+
+        // kept si conta, non si sottrae: fra gli id richiesti ce ne possono
+        // essere di gia' spostati o inesistenti, che non sono "trattenuti".
+        const rest = await client.query(
+            'SELECT count(*)::int AS n FROM media WHERE media_id = ANY($1)', [mediaIds]);
+
+        await client.query('COMMIT');
+        logger.info({ moved: res.rowCount, richiesti: mediaIds.length }, 'DB: markNotMedia');
+        return { moved: res.rowCount, kept: rest.rows[0].n };
+    }
+    catch(err) {
+        await client.query('ROLLBACK');
+        dblog.createLog('ERROR DB markNotMedia', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
+module.exports = { upsertBatch, markMissing, getOthers, countOthers, getStats, markNotMedia };

@@ -504,6 +504,16 @@ fastify.register((instance, opts, done) => {
         return { count };
     });
 
+    // Un media che si e' rivelato altro -- una nota vocale in .3gp, che e' un
+    // contenitore video -- esce dalla libreria ed entra fra i file non gestiti.
+    instance.post('/media/not-media', async (req, reply) => {
+        const ids = (req.body || {}).media_ids;
+        if (!Array.isArray(ids)) {
+            return reply.status(400).send({ error: 'serve media_ids[]' });
+        }
+        return await db.markNotMedia(ids.map((id) => utils.toInt(id, null)).filter(Boolean));
+    });
+
     instance.post('/thumb/batch', async (req, reply) => {
         const items = (req.body || {}).items;
         if (!Array.isArray(items)) {
