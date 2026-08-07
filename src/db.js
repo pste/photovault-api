@@ -363,6 +363,11 @@ module.exports = {
     upsertTag: tags.upsertTag,
     addMediaTag: tags.addMediaTag,
     removeMediaTag: tags.removeMediaTag,
+    listTags: tags.listTags,
+    getTagKinds: tags.getKinds,
+    updateTag: tags.updateTag,
+    mergeTags: tags.mergeTags,
+    clearTag: tags.clearTag,
     // job
     getJobs: jobs.getJobs,
     deleteJob: jobs.deleteJob,

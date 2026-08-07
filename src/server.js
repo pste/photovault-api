@@ -229,6 +229,59 @@ fastify.register((instance, opts, done) => {
         return await db.getTags();
     });
 
+    // ---------- gestione dei tag ----------
+
+    instance.get('/tags/manage', async (req) => {
+        const blocked = req.query.blocked === undefined ? null : req.query.blocked === 'true';
+        return await db.listTags({ kind: req.query.kind || null, q: req.query.q || null, blocked });
+    });
+
+    instance.get('/tags/kinds', async () => {
+        return await db.getTagKinds();
+    });
+
+    instance.patch('/tags/:id', async (req, reply) => {
+        const tag_id = utils.toInt(req.params.id, null);
+        if (!tag_id) {
+            return reply.status(400).send({ error: 'tag non valido' });
+        }
+        const { display_name, kind, blocked } = req.body || {};
+        if (display_name !== undefined && String(display_name).trim().length === 0) {
+            return reply.status(400).send({ error: 'il nome non puo\' essere vuoto' });
+        }
+        const tag = await db.updateTag(tag_id, {
+            display_name: display_name === undefined ? null : String(display_name).trim(),
+            kind: kind === undefined ? null : kind,
+            blocked: blocked === undefined ? null : Boolean(blocked),
+        });
+        if (!tag) {
+            return reply.status(404).send({ error: 'tag inesistente' });
+        }
+        return tag;
+    });
+
+    instance.post('/tags/:id/merge', async (req, reply) => {
+        const fromId = utils.toInt(req.params.id, null);
+        const intoId = utils.toInt((req.body || {}).into, null);
+        if (!fromId || !intoId) {
+            return reply.status(400).send({ error: 'servono due tag' });
+        }
+        if (fromId === intoId) {
+            return reply.status(400).send({ error: 'un tag non si fonde con se stesso' });
+        }
+        return await db.mergeTags(fromId, intoId);
+    });
+
+    // Non e' una DELETE perche' la riga non sparisce: le assegnazioni si
+    // tolgono e il tag resta bloccato, che e' l'unico modo perche' non torni.
+    instance.post('/tags/:id/clear', async (req, reply) => {
+        const tag_id = utils.toInt(req.params.id, null);
+        if (!tag_id) {
+            return reply.status(400).send({ error: 'tag non valido' });
+        }
+        return await db.clearTag(tag_id);
+    });
+
     instance.post('/media/:id/tags', async (req, reply) => {
         const media_id = utils.toInt(req.params.id, null);
         const { add, remove } = req.body || {};
