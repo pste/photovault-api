@@ -377,6 +377,26 @@ fastify.register((instance, opts, done) => {
         return await db.getOthersStats();
     });
 
+    // ---------- live photo ----------
+
+    instance.get('/livephotos', async (req) => {
+        const { limit, offset } = paging(req.query);
+        const items = await db.getLivePhotos(limit, offset);
+        const stats = await db.getLivePhotoStats();
+        return { items, total: stats.coppie, bytes_video: stats.bytes_video, limit, offset };
+    });
+
+    // Cestina il video di ogni coppia e tiene la foto. Gli id li sceglie il
+    // database e non il client: l'azione vale su tutte le coppie, non solo su
+    // quelle della pagina che si sta guardando.
+    instance.post('/livephotos/trash-videos', async () => {
+        const ids = await db.getLivePhotoVideoIds();
+        if (ids.length === 0) {
+            return { cestinati: 0 };
+        }
+        return await db.trashMedia(ids);
+    });
+
     // ---------- cestino ----------
 
     instance.get('/trash', async (req) => {
@@ -587,6 +607,13 @@ fastify.register((instance, opts, done) => {
             return reply.status(400).send({ error: 'serve media_ids[]' });
         }
         return await db.markNotMedia(ids.map((id) => utils.toInt(id, null)).filter(Boolean));
+    });
+
+    // Ricalcolo degli accoppiamenti Live Photo. Sta fra le rotte interne perche'
+    // lo chiama il pod come job: e' una passata SQL, ma deve girare **dopo**
+    // thumbs, che e' l'unico a conoscere la durata dei video.
+    instance.post('/livephotos/pair', async () => {
+        return await db.pairLivePhotos();
     });
 
     instance.post('/thumb/batch', async (req, reply) => {

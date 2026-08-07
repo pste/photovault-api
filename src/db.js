@@ -10,6 +10,7 @@ const parameters = require('./dbmodels/parameters');
 const duplicates = require('./dbmodels/duplicates');
 const trash = require('./dbmodels/trash');
 const others = require('./dbmodels/others');
+const livephotos = require('./dbmodels/livephotos');
 const dblog = require('./dbmodels/logs');
 const dedup = require('./dedup');
 
@@ -385,6 +386,11 @@ module.exports = {
     getOthersStats: others.getStats,
     markNotMedia: others.markNotMedia,
     getOtherDetail: others.getDetail,
+    // live photo
+    pairLivePhotos: livephotos.pair,
+    getLivePhotos: livephotos.list,
+    getLivePhotoStats: livephotos.stats,
+    getLivePhotoVideoIds: livephotos.videoIds,
     // cestino
     trashMedia, trashFolders, getFolderContents, getExpiredTrash,
     getPendingTrash,
