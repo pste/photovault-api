@@ -334,7 +334,7 @@ async function getGroupMembers(dup_group_id) {
     try {
         const stm = `
             SELECT m.media_id, m.file_name, m.media_kind, m.file_size,
-                   m.width, m.height, m.capture_ts, m.thumb_status,
+                   m.width, m.height, m.capture_ts, m.thumb_status, m.hash_kind,
                    EXTRACT(EPOCH FROM m.updated)::bigint AS v,
                    f."path" AS folder_path, f.folder_id,
                    d.distance, d.is_keeper
