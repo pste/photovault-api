@@ -1,4 +1,5 @@
 const fsp = require('node:fs/promises');
+const path = require('node:path');
 
 const logger = require('./logger');
 const fastifyApp = require('fastify');
@@ -110,6 +111,25 @@ function paging(query) {
 // Condiviso da media e file non gestiti: sono la stessa operazione, e il Range
 // serve a entrambi -- un video si apre a meta', e fra i file non gestiti ci sono
 // ISO da 27 GB che nessuno vuole riscaricare da capo dopo un'interruzione.
+// Tipo del file dall'estensione. Senza Content-Type la risposta usciva nuda, e
+// Chrome indovinava dal contenuto; Safari -- quello di iPhone in particolare --
+// e' piu' rigido, e un video senza tipo puo' non partire. Cio' che non e' qui
+// resta application/octet-stream: si scarica e basta.
+const CONTENT_TYPES = {
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
+    webp: 'image/webp', bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff',
+    heic: 'image/heic', heif: 'image/heif', avif: 'image/avif',
+    mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
+    '3gp': 'video/3gpp', mkv: 'video/x-matroska', avi: 'video/x-msvideo',
+    mpg: 'video/mpeg', mpeg: 'video/mpeg', mts: 'video/mp2t', m2t: 'video/mp2t',
+    wmv: 'video/x-ms-wmv',
+};
+
+function contentTypeOf(filePath) {
+    const ext = path.extname(filePath).slice(1).toLowerCase();
+    return CONTENT_TYPES[ext] || 'application/octet-stream';
+}
+
 async function sendOriginal(req, reply, filePath) {
     if (!paths.isInsideRoot(filePath)) {
         return reply.status(400).send({ error: 'percorso non valido' });
@@ -134,6 +154,7 @@ async function sendOriginal(req, reply, filePath) {
 
     reply.header('Accept-Ranges', 'bytes');
     reply.header('Cache-Control', 'private, max-age=3600');
+    reply.type(contentTypeOf(filePath));
 
     const range = req.headers.range;
     if (range) {
