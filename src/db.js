@@ -401,6 +401,7 @@ module.exports = {
     // parametri e log
     getParameters: parameters.getParameters,
     saveParameters: parameters.saveParameters,
+    invalidParameters: parameters.invalidReason,
     getLogs: dblog.getLogs,
     // esportata per i test
     refuseReason,

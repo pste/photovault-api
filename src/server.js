@@ -453,7 +453,11 @@ fastify.register((instance, opts, done) => {
         return await db.getParameters();
     });
 
-    instance.post('/parameters', async (req) => {
+    instance.post('/parameters', async (req, reply) => {
+        const reason = db.invalidParameters(req.body || {});
+        if (reason) {
+            return reply.status(400).send({ error: reason });
+        }
         return await db.saveParameters(req.body || {});
     });
 
