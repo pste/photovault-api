@@ -36,16 +36,6 @@ function paging(query) {
     return { limit, offset: page * limit };
 }
 
-// Invia un file dal disco.
-//
-// Si apre il file PRIMA di iniziare a rispondere, e non ci si affida a un
-// handler 'error' sullo stream: quando l'errore arriva, reply.send(stream) e'
-// gia' stato chiamato e la risposta e' partita, quindi un secondo send fallisce
-// e abbatte il processo (verificato: bastava una thumbnail mancante).
-// Aprendo prima, l'esito e' noto quando la risposta non e' ancora cominciata.
-//
-// fsp.open e' asincrona e usa il threadpool: a differenza di statSync, contro un
-// mount CIFS bloccato non ferma l'event loop.
 // Streaming di un file della share, con supporto Range.
 //
 // Condiviso da media e file non gestiti: sono la stessa operazione, e il Range
@@ -98,7 +88,21 @@ async function sendOriginal(req, reply, filePath) {
     return reply.send(handle.createReadStream({ autoClose: true }));
 }
 
-async function sendFile(reply, filePath, mimeType) {
+// Invia un file dal disco.
+//
+// Si apre il file PRIMA di iniziare a rispondere, e non ci si affida a un
+// handler 'error' sullo stream: quando l'errore arriva, reply.send(stream) e'
+// gia' stato chiamato e la risposta e' partita, quindi un secondo send fallisce
+// e abbatte il processo (verificato: bastava una thumbnail mancante).
+// Aprendo prima, l'esito e' noto quando la risposta non e' ancora cominciata.
+//
+// fsp.open e' asincrona e usa il threadpool: a differenza di statSync, contro un
+// mount CIFS bloccato non ferma l'event loop.
+//
+// Gli header passati si applicano solo se il file si apre: una cache
+// "immutable" di un anno messa prima valeva anche per il 404 e il 503, e il
+// browser teneva l'errore per quella URL anche a file comparso o NAS tornato.
+async function sendFile(reply, filePath, mimeType, headers) {
     if (!paths.isInsideRoot(filePath)) {
         return reply.status(400).send({ error: 'percorso non valido' });
     }
@@ -117,6 +121,7 @@ async function sendFile(reply, filePath, mimeType) {
         return reply.status(503).send({ error: 'storage non disponibile' });
     }
 
+    reply.headers(headers || {});
     reply.type(mimeType);
     return reply.send(handle.createReadStream({ autoClose: true }));
 }
@@ -215,9 +220,10 @@ fastify.register((instance, opts, done) => {
             return reply.status(400).send({ error: 'parametri non validi' });
         }
 
-        reply.header('Cache-Control', 'public, max-age=31536000, immutable');
-        reply.header('ETag', `"${media_id}-${size}-${req.query.v || '0'}"`);
-        return sendFile(reply, paths.thumbPath(media_id, size), 'image/jpeg');
+        return sendFile(reply, paths.thumbPath(media_id, size), 'image/jpeg', {
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'ETag': `"${media_id}-${size}-${req.query.v || '0'}"`,
+        });
     });
 
     // Originale, con supporto Range: serve alla riproduzione video e al download.
