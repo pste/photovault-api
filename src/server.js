@@ -3,10 +3,17 @@ const fsp = require('node:fs/promises');
 const logger = require('./logger');
 const fastifyApp = require('fastify');
 const cors = require('@fastify/cors');
+const cookie = require('@fastify/cookie');
+const session = require('@fastify/session');
 
 const db = require('./db');
 const paths = require('./paths');
 const utils = require('./utils');
+const users = require('./dbmodels/users');
+const sessions = require('./dbmodels/sessions');
+const passwords = require('./passwords');
+const sessionStore = require('./sessionStore');
+const loginLimiter = require('./loginLimiter');
 
 const MAX_PAGE = 500;
 const DEFAULT_PAGE = 200;
@@ -17,6 +24,10 @@ const fastifyOptions = {
     loggerInstance: logger,
     disableRequestLogging: (process.env.DISABLE_REQUEST_LOGGING) ? true : false,
     requestTimeout: 30 * 1000,
+    // L'API sta dietro Traefik: senza, req.ip sarebbe l'indirizzo di Traefik
+    // per tutti, e il limite ai tentativi di login per IP bloccherebbe insieme
+    // ogni client della casa.
+    trustProxy: true,
 }
 
 const fastify = fastifyApp(fastifyOptions);
@@ -26,7 +37,57 @@ const corsOrigins = (process.env.CORS_ORIGINS || '')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 
-fastify.register(cors, { origin: (corsOrigins.length > 0) ? corsOrigins : false });
+// credentials: in sviluppo la UI sta su un'altra porta, e senza il browser non
+// manderebbe il cookie di sessione alle chiamate fetch.
+fastify.register(cors, { origin: (corsOrigins.length > 0) ? corsOrigins : false, credentials: true });
+
+// =============== SESSIONI =============== //
+//
+// Il cookie dura SESSION_TIMEOUTSECS (90 giorni di default) e si rinnova
+// quando si usa l'app: si resta dentro finche' la si usa. Ma NON a ogni
+// richiesta, come fa rolling: una griglia chiede 200 thumbnail, e sarebbero
+// 200 scritture in database per pagina. Si rinnova al massimo una volta al
+// giorno, in requireUser.
+//
+// httpOnly: nessuno script della pagina legge il cookie. sameSite lax: non
+// parte da richieste avviate da altri siti. secure auto: solo su HTTPS quando
+// la richiesta arriva in HTTPS, cosi' lo sviluppo in HTTP funziona ancora.
+const SESSION_TIMEOUT_MS = utils.toInt(process.env.SESSION_TIMEOUTSECS, 90 * 24 * 3600) * 1000;
+const SESSION_RENEW_MS = 24 * 3600 * 1000;
+
+if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
+    logger.fatal('SESSION_SECRET mancante o piu\' corto di 32 caratteri');
+    process.exit(1);
+}
+
+fastify.register(cookie);
+fastify.register(session, {
+    cookieName: 'photovault',
+    secret: process.env.SESSION_SECRET,
+    store: sessionStore,
+    cookie: {
+        secure: 'auto',
+        httpOnly: true,
+        sameSite: 'lax',
+        maxAge: SESSION_TIMEOUT_MS,
+    },
+    saveUninitialized: false,
+    rolling: false,
+});
+
+// Tutte le rotte aperte all'utente passano da qui, tranne health e login.
+// Rinnova il cookie quando l'ultimo rinnovo ha piu' di un giorno.
+async function requireUser(req, reply) {
+    const user = req.session.get('user');
+    if (!user) {
+        return reply.status(401).send({ error: 'login richiesto' });
+    }
+    const renewed = req.session.get('renewed') || 0;
+    if (Date.now() - renewed > SESSION_RENEW_MS) {
+        req.session.set('renewed', Date.now());
+        req.session.touch();
+    }
+}
 
 // =============== HELPER =============== //
 
@@ -134,12 +195,72 @@ async function sendFile(reply, filePath, mimeType, headers) {
     return reply.send(handle.createReadStream({ autoClose: true }));
 }
 
-// =============== ROTTE APERTE =============== //
+// =============== ROTTE SENZA LOGIN =============== //
+//
+// Le sole tre che si raggiungono senza sessione: health serve alle probe di
+// Kubernetes, login e logout a entrare e uscire.
 
 fastify.register((instance, opts, done) => {
 
     instance.get('/health', async () => {
         return { status: 'ok' };
+    });
+
+    // Stessa risposta per nome sconosciuto e password sbagliata: dire quale
+    // dei due e' sbagliato direbbe quali nomi esistono.
+    instance.post('/login', async (req, reply) => {
+        const { username, password } = req.body || {};
+        if (!username || !password) {
+            return reply.status(400).send({ error: 'servono nome utente e password' });
+        }
+        const wait = loginLimiter.retryAfterSecs(req.ip, username);
+        if (wait > 0) {
+            logger.warn({ ip: req.ip, username }, 'login bloccato: troppi tentativi falliti');
+            reply.header('Retry-After', wait);
+            return reply.status(429).send({ error: `Troppi tentativi falliti: riprova tra ${Math.ceil(wait / 60)} minuti` });
+        }
+
+        const user = await users.getUserByName(username);
+        const ok = user
+            ? await passwords.verifyPassword(password, user.password_hash)
+            : await passwords.verifyMissingUser(password);
+        if (!ok) {
+            loginLimiter.recordFailure(req.ip, username);
+            logger.warn({ ip: req.ip, username }, 'login fallito');
+            return reply.status(401).send({ error: 'nome utente o password errati' });
+        }
+
+        loginLimiter.recordSuccess(req.ip, username);
+        // Sessione nuova a ogni login: un id di sessione noto prima del login
+        // non deve diventare valido dopo.
+        await req.session.regenerate();
+        req.session.set('user', { user_id: user.user_id, username: user.username });
+        req.session.set('renewed', Date.now());
+        await users.touchLogin(user.user_id);
+        // Pulizia delle sessioni scadute: al login basta, non serve un job.
+        sessions.deleteExpiredSessions().catch((err) => logger.error(err, 'pulizia sessioni fallita'));
+        logger.info({ username: user.username }, 'login');
+        return { username: user.username };
+    });
+
+    instance.post('/logout', async (req) => {
+        if (req.session.get('user')) {
+            await req.session.destroy();
+        }
+        return { ok: true };
+    });
+
+    done();
+}, { prefix: '/api' });
+
+// =============== ROTTE CON LOGIN =============== //
+
+fastify.register((instance, opts, done) => {
+
+    instance.addHook('preHandler', requireUser);
+
+    instance.get('/me', async (req) => {
+        return { username: req.session.get('user').username };
     });
 
     // Stato della share. Alimenta il banner in UI: la navigazione dei metadati
@@ -229,7 +350,9 @@ fastify.register((instance, opts, done) => {
         }
 
         return sendFile(reply, paths.thumbPath(media_id, size), 'image/jpeg', {
-            'Cache-Control': 'public, max-age=31536000, immutable',
+            // private e non public: dietro il login una thumbnail e' un dato
+            // dell'utente, e una cache condivisa non deve tenerla.
+            'Cache-Control': 'private, max-age=31536000, immutable',
             'ETag': `"${media_id}-${size}-${req.query.v || '0'}"`,
         });
     });
@@ -484,9 +607,8 @@ fastify.register((instance, opts, done) => {
 
 // =============== ROTTE INTERNE (bearer token) =============== //
 //
-// Unica regola di sicurezza dell'applicazione: se il path inizia per
-// /api/internal serve il bearer token, tutto il resto e' aperto.
-// Raggruppare le rotte dei cron sotto un prefisso dedicato rende la regola
+// Le rotte dei cron: se il path inizia per /api/internal serve il bearer
+// token, e la sessione non conta. Raggruppare le rotte dei cron sotto un prefisso dedicato rende la regola
 // verificabile a colpo d'occhio, invece di dover controllare rotta per rotta.
 
 fastify.register((instance, opts, done) => {

@@ -30,6 +30,8 @@ DISABLE_REQUEST_LOGGING=true
 
 MEDIA_ROOT=/data/photos        # mount della share, in sola lettura
 BEARER_TOKEN=                  # protegge le rotte /api/internal/*
+SESSION_SECRET=                # firma il cookie di sessione, almeno 32 caratteri
+SESSION_TIMEOUTSECS=7776000    # durata del cookie, 90 giorni
 
 PGHOST=localhost
 PGPORT=5432
@@ -52,6 +54,10 @@ src/server.js          # registrazione plugin e rotte
 src/db.js              # facade: l'unica cosa che server.js importa
 src/dbmodels/          # una per tabella, SQL grezza
   dbpool.js            # pool pg condiviso
+src/passwords.js       # hash scrypt delle password
+src/sessionStore.js    # store di @fastify/session sulla tabella sessions
+src/loginLimiter.js    # limite ai tentativi di login falliti
+src/cli.js             # node app.js user add|passwd|del|list
 src/logger.js
 src/utils.js
 ```
@@ -61,26 +67,56 @@ Ogni funzione dei dbmodels segue lo stesso schema: `pool.connect()`, `try` con l
 
 ## Autenticazione
 
-**Non c'è login.** L'app gira in rete locale e la sicurezza si riduce a una sola regola:
+Due regole, una per chi usa l'app e una per i cron:
 
-> se il path inizia per `/api/internal`, serve `Authorization: Bearer $BEARER_TOKEN`;
-> tutto il resto è aperto.
+- **l'utente fa login.** Tutte le rotte sotto `/api` richiedono una sessione, tranne
+  `/api/health` (le probe di Kubernetes), `/api/login` e `/api/logout`;
+- **i cron usano il bearer token.** Le rotte `/api/internal/*` vogliono
+  `Authorization: Bearer $BEARER_TOKEN`, e la sessione non conta. Sono raggruppate in un
+  unico `fastify.register` con `prefix` e un solo `preHandler`, così la regola è verificabile
+  a colpo d'occhio.
 
-Le rotte `/api/internal/*` sono quelle usate dai cron (claim dei job, ingest dei risultati).
-Sono raggruppate in un unico `fastify.register` con `prefix` e un solo `preHandler`, così la
-regola è verificabile a colpo d'occhio.
+L'app resta in LAN: il login c'è per alzare la sicurezza e per sapere chi fa cosa. Tutti gli
+utenti vedono la stessa libreria, senza ruoli.
 
-Se un domani l'app venisse esposta fuori dalla LAN, l'autenticazione va aggiunta **prima** di
-qualsiasi altra cosa.
+- **Password**: hash `scrypt` della libreria standard, con salt e confronto a tempo costante;
+  mai in chiaro. Un nome inesistente costa lo stesso tempo di una password sbagliata, e la
+  risposta è la stessa.
+- **Sessioni**: `@fastify/session` con lo store su Postgres (tabella `sessions`), così un
+  riavvio dell'API non slogga nessuno. Cookie `HttpOnly`, `SameSite=Lax`, `Secure` quando la
+  richiesta arriva in HTTPS. Dura 90 giorni e si rinnova quando si usa l'app, ma al massimo
+  una volta al giorno: una griglia chiede 200 thumbnail, e rinnovare a ogni richiesta sarebbero
+  200 scritture per pagina.
+- **Tentativi falliti**: 10 per nome utente e 20 per IP ogni 15 minuti, poi 429.
+
+Gli utenti si gestiscono da riga di comando, mai da una rotta web:
+
+```bash
+kubectl -n photovault exec -it deploy/api -- node app.js user add <nome>
+kubectl -n photovault exec -it deploy/api -- node app.js user passwd <nome>
+kubectl -n photovault exec -it deploy/api -- node app.js user del <nome>
+kubectl -n photovault exec -it deploy/api -- node app.js user list
+```
+
+La password si chiede senza mostrarla, e non passa mai dalla riga di comando. Eliminare un
+utente chiude anche le sue sessioni.
 
 ## Rotte principali
 
-Elenco derivato dal codice, non scritto a mano: 35 rotte aperte e 22 interne.
+Elenco derivato dal codice, non scritto a mano: 3 rotte senza login, 35 con login e 22 interne.
 
-Aperte, sotto `/api`:
+Senza login, sotto `/api`:
 
 ```
 GET    /health
+POST   /login                               { username, password }
+POST   /logout
+```
+
+Con login, sotto `/api`:
+
+```
+GET    /me                                  utente della sessione
 GET    /health/storage                      stato della share, alimenta il banner in UI
 GET    /stats                               contatori e avanzamento di ogni fase, per la pagina Stats
 GET    /browse/roots
@@ -189,7 +225,8 @@ girerebbe mai, senza alcun errore visibile.
 ## Thumbnail e cache
 
 Le thumbnail vengono servite da `MEDIA_ROOT/.photovault/thumbs/` con
-`Cache-Control: public, max-age=31536000, immutable` ed `ETag`. L'URL porta un parametro
+`Cache-Control: private, max-age=31536000, immutable` ed `ETag` — `private` perché dietro il
+login una thumbnail è un dato dell'utente, e una cache condivisa non deve tenerla. L'URL porta un parametro
 `?v=<updated>` che cambia se il file cambia, il che rende `immutable` corretto.
 
 Questo sostituisce integralmente la cache IndexedDB di reimagined-disco: non va portata.
