@@ -47,18 +47,16 @@ function buildComponents(pairs) {
     return components;
 }
 
-// Distanza minima di ciascun membro rispetto al resto del gruppo: e' il numero
-// che la UI mostra accanto alla miniatura per dire "quanto e' simile".
-function collectDistances(pairs) {
-    const distances = {};
-    for (const pair of pairs) {
-        for (const id of [pair.a_id, pair.b_id]) {
-            if (distances[id] === undefined || pair.distance < distances[id]) {
-                distances[id] = pair.distance;
-            }
+// I gruppi aperti toccati dalle coppie nuove entrano nell'union-find come archi
+// fra i loro membri: basta collegare ogni membro al primo.
+function groupEdges(groups) {
+    const edges = [];
+    for (const group of groups) {
+        for (const media_id of group.members.slice(1)) {
+            edges.push({ a_id: group.members[0], b_id: media_id });
         }
     }
-    return distances;
+    return edges;
 }
 
 // Distanza di Hamming tra due dHash espressi come stringhe di 64 bit.
@@ -142,10 +140,23 @@ async function rebuild(maxDistance) {
 
     // --- duplicati simili: coppie per distanza di Hamming, poi union-find
     const pairs = await duplicates.findSimilarPairs(maxDistance);
-    const distances = collectDistances(pairs);
-    const components = buildComponents(pairs);
+
+    // Il confronto e' incrementale, quindi le coppie nuove non vedono i gruppi
+    // gia' aperti. Se C arriva nuovo e somiglia ad A, che sta nel gruppo aperto
+    // {A,B}, il gruppo veniva riscritto come {A,C} e B spariva; se C somigliava
+    // solo a B, B finiva in due gruppi, keeper in uno e da cestinare nell'altro.
+    // Si fondono quindi i gruppi aperti toccati dalle coppie nuove: il risultato
+    // e' quello che darebbe un rebuild completo.
+    const pairIds = new Set();
+    for (const pair of pairs) {
+        pairIds.add(pair.a_id);
+        pairIds.add(pair.b_id);
+    }
+    const touched = await duplicates.getOpenSimilarGroupsOf([...pairIds]);
+    const components = buildComponents(pairs.concat(groupEdges(touched)));
 
     let trimmed = 0;
+    let absorbed = 0;
     for (const members of components.values()) {
         if (members.length < 2) {
             continue;
@@ -168,26 +179,42 @@ async function rebuild(maxDistance) {
         const keeperRow = rows.find((row) => row.media_id === keeper);
         const wasted = total - Number(keeperRow ? keeperRow.file_size : 0);
 
+        // La distanza mostrata accanto alla miniatura e' quella dal keeper: e'
+        // il criterio con cui la stella ha tenuto il membro.
+        const distances = {};
+        for (const row of rows) {
+            distances[row.media_id] = hamming(keeperRow.dhash, row.dhash);
+        }
+
         const kept = rows.map((row) => row.media_id);
         const groupKey = Math.min(...kept);
         const outcome = await duplicates.upsertGroup(
             'similar', groupKey, kept, keeper, wasted, distances);
-        if (!outcome.skipped) {
-            similarCount++;
+        if (outcome.skipped) {
+            continue;
         }
+        similarCount++;
+
+        // I gruppi aperti fusi in questo, se avevano un'altra chiave, sono
+        // ora un doppione: vanno tolti.
+        const merged = touched
+            .filter((group) => group.group_key !== String(groupKey))
+            .filter((group) => group.members.some((id) => members.includes(id)))
+            .map((group) => group.dup_group_id);
+        absorbed += await duplicates.deleteOpenGroups(merged);
     }
 
     const checked = await duplicates.markDedupChecked();
     const dropped = await duplicates.dropStaleGroups();
 
-    logger.info({ exactCount, similarCount, trimmed, checked, dropped }, 'rebuild duplicati concluso');
+    logger.info({ exactCount, similarCount, trimmed, absorbed, checked, dropped }, 'rebuild duplicati concluso');
     return {
         gruppi_esatti: exactCount,
         gruppi_simili: similarCount,
         confrontati: checked,
-        gruppi_rimossi: dropped,
+        gruppi_rimossi: dropped + absorbed,
         membri_scartati: trimmed,
     };
 }
 
-module.exports = { rebuild, buildComponents, pickKeeper, collectDistances };
+module.exports = { rebuild, buildComponents, pickKeeper };

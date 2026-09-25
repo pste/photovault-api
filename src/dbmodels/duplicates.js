@@ -184,6 +184,58 @@ async function upsertGroup(kind, groupKey, members, keeperId, bytesWasted, dista
     }
 }
 
+// Gruppi simili ancora aperti che contengono almeno uno dei media dati, con
+// l'elenco completo dei loro membri. Servono al rebuild incrementale per
+// fondere i gruppi esistenti con le coppie nuove.
+async function getOpenSimilarGroupsOf(ids) {
+    if (!ids || ids.length === 0) {
+        return [];
+    }
+    const client = await pool.connect();
+    try {
+        const stm = `
+            SELECT g.dup_group_id, g.group_key,
+                   array_agg(d.media_id ORDER BY d.media_id) AS members
+            FROM dup_groups g
+            JOIN dup_members d ON d.dup_group_id = g.dup_group_id
+            WHERE g.kind = 'similar' AND g."status" = 'open'
+              AND g.dup_group_id IN (SELECT dup_group_id FROM dup_members WHERE media_id = ANY($1))
+            GROUP BY g.dup_group_id, g.group_key`;
+        logger.trace({ ids: ids.length }, 'DB: getOpenSimilarGroupsOf');
+        const res = await client.query(stm, [ids]);
+        return res.rows;
+    }
+    catch(err) {
+        dblog.createLog('ERROR DB getOpenSimilarGroupsOf', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
+// Elimina gruppi aperti assorbiti da un gruppo piu' grande. La cascade toglie
+// i membri; un gruppo gia' deciso dall'utente non si tocca mai.
+async function deleteOpenGroups(ids) {
+    if (!ids || ids.length === 0) {
+        return 0;
+    }
+    const client = await pool.connect();
+    try {
+        const res = await client.query(
+            `DELETE FROM dup_groups WHERE dup_group_id = ANY($1) AND "status" = 'open'`, [ids]);
+        logger.trace({ rows: res.rowCount }, 'DB: deleteOpenGroups');
+        return res.rowCount;
+    }
+    catch(err) {
+        dblog.createLog('ERROR DB deleteOpenGroups', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
 // Gruppi ancora aperti che non hanno piu' almeno due membri: succede dopo che
 // l'utente ha svuotato un gruppo, o quando i file spariscono dal disco.
 async function dropStaleGroups() {
@@ -358,6 +410,6 @@ async function getStats() {
 
 module.exports = {
     saveHashes, findExactGroups, findSimilarPairs, markDedupChecked,
-    upsertGroup, dropStaleGroups, getMediaBrief,
+    upsertGroup, getOpenSimilarGroupsOf, deleteOpenGroups, dropStaleGroups, getMediaBrief,
     getGroups, countGroups, getGroupMembers, getGroup, setGroupStatus, getStats,
 };
