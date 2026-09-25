@@ -117,7 +117,9 @@ GET    /parameters   POST /parameters
 GET    /logs
 ```
 
-Tutte le rotte paginate accettano `page` e `size` (default 200, massimo 500).
+Tutte le rotte paginate accettano `page` e `size` (default 200, massimo 500), oppure `offset` al
+posto di `page`: è quello che usa l'infinite scroll, che chiede "dal file N" dove N è quanti ne ha
+già, così i file appena cestinati non spostano la pagina successiva.
 
 Protette da bearer token, sotto `/api/internal`:
 

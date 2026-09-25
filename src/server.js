@@ -30,9 +30,17 @@ fastify.register(cors, { origin: (corsOrigins.length > 0) ? corsOrigins : false 
 
 // =============== HELPER =============== //
 
+// ?offset=, se c'e', vince su ?page=. Serve all'infinite scroll: la UI chiede
+// "dal file numero N", dove N e' quanti ne ha gia'. Con page, dopo aver
+// cestinato k file -- che l'API esclude subito -- la pagina successiva partiva
+// k righe troppo avanti, e quei k file non comparivano mai.
 function paging(query) {
     const limit = utils.clamp(utils.toInt(query.size, DEFAULT_PAGE), 1, MAX_PAGE);
     const page = utils.clamp(utils.toInt(query.page, 0), 0, Number.MAX_SAFE_INTEGER);
+    const offset = utils.toInt(query.offset, null);
+    if (offset !== null) {
+        return { limit, offset: utils.clamp(offset, 0, Number.MAX_SAFE_INTEGER) };
+    }
     return { limit, offset: page * limit };
 }
 
