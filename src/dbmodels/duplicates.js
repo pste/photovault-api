@@ -67,10 +67,57 @@ async function findExactGroups() {
     }
 }
 
+// Membri dei gruppi esatti gia' in archivio, come "id,id,id" per chiave: serve
+// al rebuild per riscrivere solo i gruppi cambiati.
+async function getExactGroupMembers() {
+    const client = await pool.connect();
+    try {
+        const stm = `
+            SELECT g.group_key, string_agg(d.media_id::text, ',' ORDER BY d.media_id) AS members
+            FROM dup_groups g
+            JOIN dup_members d ON d.dup_group_id = g.dup_group_id
+            WHERE g.kind = 'exact'
+            GROUP BY g.group_key`;
+        const res = await client.query(stm);
+        return new Map(res.rows.map((row) => [row.group_key, row.members]));
+    }
+    catch(err) {
+        dblog.createLog('ERROR DB getExactGroupMembers', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
+// Il prossimo blocco di media da confrontare, e quanti ne restano in tutto.
+async function nextToCompare(limit) {
+    const client = await pool.connect();
+    try {
+        const ids = await client.query(`
+            SELECT media_id FROM media
+            WHERE dedup_checked IS NULL AND dhash IS NOT NULL
+            ORDER BY media_id
+            LIMIT $1`, [limit]);
+        const left = await client.query(`
+            SELECT count(*)::int AS n FROM media
+            WHERE dedup_checked IS NULL AND dhash IS NOT NULL`);
+        return { ids: ids.rows.map((row) => row.media_id), left: left.rows[0].n };
+    }
+    catch(err) {
+        dblog.createLog('ERROR DB nextToCompare', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
 // Coppie percettivamente simili.
 //
 // Il confronto e' INCREMENTALE: solo le righe mai confrontate (dedup_checked
-// NULL) vengono messe contro l'intero corpus. Il primo giro e' quello caro, i
+// NULL) vengono messe contro l'intero corpus, e un blocco alla volta: gli id
+// arrivano da nextToCompare. Il primo giro e' quello caro, i
 // successivi sono "poche righe nuove per tutte le vecchie", cioe' quasi nulla.
 // Batte l'LSH banding su semplicita' e su correttezza: il banding con 4 bande
 // da 16 bit garantisce il recall completo solo fino a distanza 3.
@@ -81,7 +128,7 @@ async function findExactGroups() {
 // Il filtro bit_count(dhash) BETWEEN 8 AND 56 scarta le immagini piatte, nere o
 // bianche: il loro dHash e' degenere e somiglierebbe a tutto, creando un unico
 // enorme gruppo di falsi positivi.
-async function findSimilarPairs(maxDistance) {
+async function findSimilarPairs(maxDistance, ids) {
     const client = await pool.connect();
     try {
         const stm = `
@@ -89,7 +136,7 @@ async function findSimilarPairs(maxDistance) {
                    bit_count(a.dhash # b.dhash)::int AS distance
             FROM media a
             JOIN media b ON b.media_id <> a.media_id
-            WHERE a.dedup_checked IS NULL
+            WHERE a.media_id = ANY($2)
               AND a.dhash IS NOT NULL AND b.dhash IS NOT NULL
               AND a.missing_since IS NULL AND b.missing_since IS NULL
               AND bit_count(a.dhash) BETWEEN 8 AND 56
@@ -98,7 +145,7 @@ async function findSimilarPairs(maxDistance) {
               AND bit_count(a.dhash # b.dhash) <= $1
             ORDER BY a.media_id, distance`;
         logger.trace({ maxDistance }, 'DB: findSimilarPairs');
-        const res = await client.query(stm, [maxDistance]);
+        const res = await client.query(stm, [maxDistance, ids]);
         return res.rows;
     }
     catch(err) {
@@ -110,13 +157,13 @@ async function findSimilarPairs(maxDistance) {
     }
 }
 
-async function markDedupChecked() {
+// Si segnano solo gli id del blocco appena confrontato: un dHash arrivato nel
+// frattempo resta in coda invece di risultare confrontato senza esserlo.
+async function markDedupChecked(ids) {
     const client = await pool.connect();
     try {
-        const stm = `
-            UPDATE media SET dedup_checked = NOW()
-            WHERE dedup_checked IS NULL AND dhash IS NOT NULL`;
-        const res = await client.query(stm);
+        const stm = 'UPDATE media SET dedup_checked = NOW() WHERE media_id = ANY($1)';
+        const res = await client.query(stm, [ids]);
         logger.trace({ rows: res.rowCount }, 'DB: markDedupChecked');
         return res.rowCount;
     }
@@ -409,7 +456,7 @@ async function getStats() {
 }
 
 module.exports = {
-    saveHashes, findExactGroups, findSimilarPairs, markDedupChecked,
+    saveHashes, findExactGroups, getExactGroupMembers, nextToCompare, findSimilarPairs, markDedupChecked,
     upsertGroup, getOpenSimilarGroupsOf, deleteOpenGroups, dropStaleGroups, getMediaBrief,
     getGroups, countGroups, getGroupMembers, getGroup, setGroupStatus, getStats,
 };

@@ -121,13 +121,30 @@ function pickKeeper(rows) {
     return sorted[0] ? sorted[0].media_id : null;
 }
 
+// Media nuovi confrontati per chiamata. Il confronto costa circa 85 ms per
+// media contro l'archivio intero (misurato su 325.000 media: 43 s per 500),
+// quindi un blocco sta ben dentro il timeout del pod anche su un nodo lento.
+// Un arretrato grande -- 63.000 media dopo le anteprime di agosto, circa 90
+// minuti in una sola richiesta -- si smaltisce cosi' a pezzi: il pod richiama
+// finche' da_confrontare non arriva a zero, e un riavvio dell'API perde al
+// massimo un blocco.
+const REBUILD_BLOCK = 1000;
+
 async function rebuild(maxDistance) {
     let exactCount = 0;
     let similarCount = 0;
 
     // --- duplicati esatti: stesso sha256, nessun join necessario
+    //
+    // Si riscrivono solo i gruppi cambiati. Riscriverli tutti a ogni giro
+    // costava 9 minuti per 80.000 gruppi -- misurato sull'archivio vero -- e da
+    // solo bastava a far scadere la richiesta del pod.
     const exact = await duplicates.findExactGroups();
+    const known = await duplicates.getExactGroupMembers();
     for (const group of exact) {
+        if (known.get(group.content_hash) === group.members.join(',')) {
+            continue;
+        }
         const rows = await duplicates.getMediaBrief(group.members);
         const keeper = pickKeeper(rows);
         const outcome = await duplicates.upsertGroup(
@@ -139,7 +156,8 @@ async function rebuild(maxDistance) {
     }
 
     // --- duplicati simili: coppie per distanza di Hamming, poi union-find
-    const pairs = await duplicates.findSimilarPairs(maxDistance);
+    const block = await duplicates.nextToCompare(REBUILD_BLOCK);
+    const pairs = await duplicates.findSimilarPairs(maxDistance, block.ids);
 
     // Il confronto e' incrementale, quindi le coppie nuove non vedono i gruppi
     // gia' aperti. Se C arriva nuovo e somiglia ad A, che sta nel gruppo aperto
@@ -204,7 +222,7 @@ async function rebuild(maxDistance) {
         absorbed += await duplicates.deleteOpenGroups(merged);
     }
 
-    const checked = await duplicates.markDedupChecked();
+    const checked = await duplicates.markDedupChecked(block.ids);
     const dropped = await duplicates.dropStaleGroups();
 
     logger.info({ exactCount, similarCount, trimmed, absorbed, checked, dropped }, 'rebuild duplicati concluso');
@@ -212,6 +230,7 @@ async function rebuild(maxDistance) {
         gruppi_esatti: exactCount,
         gruppi_simili: similarCount,
         confrontati: checked,
+        da_confrontare: block.left - checked,
         gruppi_rimossi: dropped + absorbed,
         membri_scartati: trimmed,
     };
