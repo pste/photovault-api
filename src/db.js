@@ -174,11 +174,12 @@ async function reconcileScan(root_id, scanStartedAt) {
     }
 
     const seen = await media.countSeenSince(root_id, scanStartedAt);
-    const refused = refuseReason(seen, root.media_count);
+    const known = await media.countKnown(root_id);
+    const refused = refuseReason(seen, known);
     if (refused) {
-        logger.error({ root_id, seen, known: root.media_count }, refused);
+        logger.error({ root_id, seen, known }, refused);
         dblog.createLog('RECONCILE REFUSED', refused);
-        return { refused: true, reason: refused, seen, known: root.media_count };
+        return { refused: true, reason: refused, seen, known };
     }
 
     const missing = await media.markMissing(root_id, scanStartedAt);

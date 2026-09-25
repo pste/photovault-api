@@ -267,6 +267,33 @@ async function countSeenSince(root_id, since) {
     }
 }
 
+// Quanti media la root dovrebbe avere adesso: quelli non gia' dati per mancanti.
+// E' il termine di paragone del guard del reconcile, e si conta dal vivo invece
+// di leggerlo da roots.media_count: quel numero e' una fotografia dell'ultimo
+// scan, e non scende quando l'utente cestina o declassa dei file. Dopo una
+// pulizia di oltre il 10% il guard rifiutava ogni reconcile, per sempre, perche'
+// il rifiuto impedisce anche l'aggiornamento della fotografia.
+async function countKnown(root_id) {
+    const client = await pool.connect();
+    try {
+        const stm = `
+            SELECT count(*)::int AS n
+            FROM media m
+            JOIN folders f ON f.folder_id = m.folder_id
+            WHERE f.root_id = $1 AND m.missing_since IS NULL`;
+        logger.trace({ root_id }, 'DB: countKnown');
+        const res = await client.query(stm, [root_id]);
+        return res.rows[0].n;
+    }
+    catch(err) {
+        dblog.createLog('ERROR DB countKnown', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
 // Marca come mancanti i media non visti nella scansione appena conclusa.
 // Non e' mai una DELETE: la rimozione definitiva resta un'azione esplicita
 // dell'utente, perche' una share smontata e una cartella svuotata sono
@@ -482,6 +509,6 @@ async function getStats() {
 module.exports = {
     getMedia, getMediaInFolder, countMediaInFolder,
     search, countSearch,
-    upsertMediaBatch, countSeenSince, markMissing,
+    upsertMediaBatch, countSeenSince, countKnown, markMissing,
     getPending, setThumbResults, setPlaceResults, getStats,
 };

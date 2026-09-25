@@ -61,8 +61,8 @@ async function upsertRoot(name, rel_path) {
     }
 }
 
-// Chiude una scansione: aggiorna last_scan e la fotografia del numero di media,
-// che al giro successivo alimenta il guard del reconcile.
+// Chiude una scansione: aggiorna last_scan e la fotografia del numero di media.
+// Resta come dato informativo: il guard del reconcile conta dal vivo (media.countKnown).
 async function closeScan(root_id, media_count) {
     const client = await pool.connect();
     try {
