@@ -323,7 +323,12 @@ async function markMissing(root_id, since) {
 
 // Coda di lavoro dei cron. Le colonne di stato SONO la coda: nessuna tabella
 // di code separata, nessun checkpoint di ripartenza.
-async function getPending(stage, limit) {
+//
+// "after" permette di scorrere la coda per media_id invece di rileggerla sempre
+// dall'inizio. Serve alle code senza stato di errore (hash e dhash): un file
+// illeggibile resta in coda, e ripartendo sempre da capo un blocco intero di
+// file illeggibili fermerebbe la fase per sempre.
+async function getPending(stage, limit, after) {
     const conditions = {
         thumb: "m.thumb_status = 'pending'",
         // I luoghi non dipendono dalle thumbnail: si ricavano dal GPS EXIF o
@@ -352,10 +357,11 @@ async function getPending(stage, limit) {
             JOIN folders f ON f.folder_id = m.folder_id
             JOIN roots r ON r.root_id = f.root_id
             WHERE m.missing_since IS NULL AND ${cond}
+              AND m.media_id > $2
             ORDER BY m.media_id
             LIMIT $1`;
-        logger.trace({ stage, limit }, 'DB: getPending');
-        const res = await client.query(stm, [limit]);
+        logger.trace({ stage, limit, after }, 'DB: getPending');
+        const res = await client.query(stm, [limit, after || 0]);
         return res.rows;
     }
     catch(err) {

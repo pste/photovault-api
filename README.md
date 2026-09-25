@@ -135,7 +135,7 @@ POST   /scan/media/batch        { items: [...] }   → upsert idempotente
 POST   /scan/other/batch        { items: [...] }   → file non gestiti
 POST   /scan/reconcile          { root_id, started_at }  → applica il guard del 90%
 
-GET    /pending/:stage          stage = thumb | place | label | hash | dhash
+GET    /pending/:stage          stage = thumb | place | label | hash | dhash; ?after=<media_id> per scorrere la coda
 POST   /thumb/batch             { items: [{ media_id, thumb_status, ...metadati }] }
 POST   /place/batch             { items: [...] }   → tag di luogo e chiusura della coda
 POST   /media/not-media         { media_ids }      → sposta fra i file non gestiti

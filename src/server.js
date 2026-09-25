@@ -581,8 +581,9 @@ fastify.register((instance, opts, done) => {
 
     instance.get('/pending/:stage', async (req, reply) => {
         const limit = utils.clamp(utils.toInt(req.query.limit, DEFAULT_PAGE), 1, MAX_PAGE);
+        const after = utils.toInt(req.query.after, 0);
         try {
-            return await db.getPending(req.params.stage, limit);
+            return await db.getPending(req.params.stage, limit, after);
         }
         catch(err) {
             return reply.status(400).send({ error: err.message });
