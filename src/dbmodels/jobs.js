@@ -127,6 +127,22 @@ async function touchJob(job_id) {
     }
 }
 
+// Istante di avvio di un job, secondo l'orologio del database.
+async function getJobStarted(job_id) {
+    const client = await pool.connect();
+    try {
+        const res = await client.query('SELECT started FROM jobs WHERE job_id = $1', [job_id]);
+        return res.rows[0] ? res.rows[0].started : null;
+    }
+    catch(err) {
+        dblog.createLog('ERROR DB getJobStarted', err);
+        throw err;
+    }
+    finally {
+        client.release();
+    }
+}
+
 async function updateJobStatus(job_id, status, result) {
     const client = await pool.connect();
     try {
@@ -170,4 +186,6 @@ async function upsertPendingJob(name, when) {
     }
 }
 
-module.exports = { getJobs, deleteJob, claimNextJob, touchJob, updateJobStatus, upsertPendingJob };
+module.exports = {
+    getJobs, deleteJob, claimNextJob, touchJob, getJobStarted, updateJobStatus, upsertPendingJob,
+};

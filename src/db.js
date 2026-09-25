@@ -371,6 +371,7 @@ module.exports = {
     clearTag: tags.clearTag,
     // job
     getJobs: jobs.getJobs,
+    getJobStarted: jobs.getJobStarted,
     deleteJob: jobs.deleteJob,
     touchJob: jobs.touchJob,
     claimNextJob: jobs.claimNextJob,

@@ -574,12 +574,18 @@ fastify.register((instance, opts, done) => {
         return { count };
     });
 
+    // L'inizio della scansione si prende dal job, cioe' dall'orologio del
+    // database: last_seen lo scrive NOW() di Postgres, e confrontarlo con
+    // l'orologio del pod voleva dire che un pod avanti di qualche secondo
+    // faceva marcare mancanti i file visti in quei secondi. started_at resta
+    // per i pod che non mandano ancora job_id.
     instance.post('/scan/reconcile', async (req, reply) => {
-        const { root_id, started_at } = req.body || {};
-        if (!root_id || !started_at) {
-            return reply.status(400).send({ error: 'servono root_id e started_at' });
+        const { root_id, started_at, job_id } = req.body || {};
+        const started = job_id ? await db.getJobStarted(job_id) : started_at;
+        if (!root_id || !started) {
+            return reply.status(400).send({ error: 'servono root_id e job_id (o started_at)' });
         }
-        const outcome = await db.reconcileScan(root_id, new Date(started_at));
+        const outcome = await db.reconcileScan(root_id, new Date(started));
         if (outcome.refused) {
             // 409 e non 500: non e' un errore del server, e' un rifiuto deliberato.
             return reply.status(409).send(outcome);
