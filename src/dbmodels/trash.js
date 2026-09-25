@@ -1,11 +1,17 @@
 const logger = require('../logger');
 const dblog = require('./logs');
 const pool = require('./dbpool');
+const { NOT_TRASHED_MEDIA, NOT_TRASHED_OTHER, NOT_TRASHED_FOLDER } = require('./sqlparts');
 
 // Mette in coda lo spostamento nel cestino. Non tocca il file: a muoverlo e'
 // il pod scan, l'unico con la share montata in scrittura. L'API resta in sola
 // lettura, ed e' una garanzia strutturale che nessun bug qui dentro possa
 // danneggiare la libreria.
+//
+// Un file gia' in coda, o dentro una cartella gia' in coda, non si accoda di
+// nuovo e la funzione restituisce null. Senza, un doppio clic o due gruppi di
+// duplicati sovrapposti creavano due spostamenti dello stesso file: il secondo
+// non trovava piu' la sorgente e finiva in errore.
 async function requestTrash(media_id) {
     const client = await pool.connect();
     try {
@@ -22,6 +28,8 @@ async function requestTrash(media_id) {
             FROM media m
             JOIN folders f ON f.folder_id = m.folder_id
             WHERE m.media_id = $1
+              AND ${NOT_TRASHED_MEDIA('m')}
+              AND ${NOT_TRASHED_FOLDER('f')}
             RETURNING *`;
         logger.trace({ media_id }, 'DB: requestTrash');
         const res = await client.query(stm, [media_id]);
@@ -52,6 +60,8 @@ async function requestTrashOther(other_id) {
                    o.file_size
             FROM other_files o
             WHERE o.other_id = $1
+              AND ${NOT_TRASHED_OTHER('o')}
+              AND ${NOT_TRASHED_FOLDER('o')}
             RETURNING *`;
         logger.trace({ other_id }, 'DB: requestTrashOther');
         const res = await client.query(stm, [other_id]);
@@ -69,9 +79,14 @@ async function requestTrashOther(other_id) {
 // Cestina una cartella intera: una sola riga di trash, che rappresenta una
 // rename dell'intera cartella. Il conteggio e la dimensione sono quelli
 // dell'INTERO sottoalbero, perche' e' quello che si muove.
+//
+// Le richieste gia' in coda per file e cartelle del sottoalbero si tolgono:
+// la rename della cartella le porta nel cestino comunque, e se trashapply le
+// eseguisse dopo non troverebbe piu' la sorgente.
 async function requestTrashFolder(folder_id) {
     const client = await pool.connect();
     try {
+        await client.query('BEGIN');
         const stm = `
             INSERT INTO trash (folder_id, root_id, original_path, trash_path,
                                file_size, file_count)
@@ -91,12 +106,27 @@ async function requestTrashFolder(folder_id) {
             ) sub ON true
             WHERE f.folder_id = $1
               AND f."path" <> ''
+              AND ${NOT_TRASHED_FOLDER('f')}
             RETURNING *`;
         logger.trace({ folder_id }, 'DB: requestTrashFolder');
         const res = await client.query(stm, [folder_id]);
-        return res.rows[0] || null;
+        const row = res.rows[0] || null;
+        if (row) {
+            await client.query(`
+                DELETE FROM trash t
+                USING folders f
+                WHERE f.folder_id = $1
+                  AND t."status" = 'pending'
+                  AND t.trash_id <> $2
+                  AND t.root_id = f.root_id
+                  AND starts_with(t.original_path, f."path")`,
+                [folder_id, row.trash_id]);
+        }
+        await client.query('COMMIT');
+        return row;
     }
     catch(err) {
+        await client.query('ROLLBACK');
         dblog.createLog('ERROR DB requestTrashFolder', err);
         throw err;
     }

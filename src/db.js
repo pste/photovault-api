@@ -262,8 +262,7 @@ async function resolveDuplicateGroup(dup_group_id, keep_media_id, action) {
 
     let queued = 0;
     for (const member of members) {
-        if (member.media_id !== keeper) {
-            await trash.requestTrash(member.media_id);
+        if (member.media_id !== keeper && await trash.requestTrash(member.media_id)) {
             queued++;
         }
     }
@@ -275,15 +274,6 @@ async function resolveDuplicateGroup(dup_group_id, keep_media_id, action) {
     return { dup_group_id, action: 'trash', cestinati: queued, keep_media_id: keeper };
 }
 
-// Cestina dei media scelti a mano dalla UI.
-//
-// Stessa strada della risoluzione dei duplicati, e non e' un caso: cestinare
-// vuol dire mettere in coda: a spostare il file e' il pod scan, l'unico con la
-// share in scrittura. Qui dentro non si cancella niente, e nemmeno si sposta.
-//
-// Un media gia' in cestino non viene accodato due volte -- requestTrash
-// restituisce null -- cosi' un doppio clic sul pulsante non genera due
-// spostamenti dello stesso file.
 // Le cartelle in coda portano con se' l'elenco dei media che contengono: il pod
 // scan deve togliere le loro thumbnail, che vivono in .photovault/thumbs/ e non
 // si spostano con la rename della cartella.
@@ -318,6 +308,15 @@ async function trashFolders(folder_ids) {
     return { cestinate: queued };
 }
 
+// Cestina dei media scelti a mano dalla UI.
+//
+// Stessa strada della risoluzione dei duplicati, e non e' un caso: cestinare
+// vuol dire mettere in coda: a spostare il file e' il pod scan, l'unico con la
+// share in scrittura. Qui dentro non si cancella niente, e nemmeno si sposta.
+//
+// Un media gia' in cestino non viene accodato due volte -- requestTrash
+// restituisce null -- cosi' un doppio clic sul pulsante non genera due
+// spostamenti dello stesso file.
 async function trashMedia(media_ids, other_ids) {
     let queued = 0;
     for (const media_id of media_ids || []) {
