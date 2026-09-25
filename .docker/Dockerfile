@@ -1,4 +1,4 @@
-FROM node:24-alpine
+FROM node:24.21.0-alpine
 
 # SETUP npm
 RUN npm config set engine-strict true
