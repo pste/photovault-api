@@ -113,7 +113,7 @@ function buildSearch(filters, forCount) {
                 SELECT 1 FROM media_tags mt
                 JOIN tags t ON t.tag_id = mt.tag_id
                 WHERE mt.media_id = m.media_id AND t."name" = $5))
-          AND ($6::varchar IS NULL OR f."path" LIKE $6 || '%')`;
+          AND ($6::varchar IS NULL OR starts_with(f."path", $6))`;
 
     const from = `
         FROM media m

@@ -87,7 +87,7 @@ async function requestTrashFolder(folder_id) {
                 SELECT count(*)::int AS files, COALESCE(sum(m.file_size), 0)::bigint AS bytes
                 FROM media m
                 JOIN folders d ON d.folder_id = m.folder_id
-                WHERE d.root_id = f.root_id AND d."path" LIKE f."path" || '%'
+                WHERE d.root_id = f.root_id AND starts_with(d."path", f."path")
             ) sub ON true
             WHERE f.folder_id = $1
               AND f."path" <> ''
@@ -114,7 +114,7 @@ async function getFolderMediaIds(folder_id) {
         const stm = `
             SELECT m.media_id
             FROM folders f
-            JOIN folders d ON d.root_id = f.root_id AND d."path" LIKE f."path" || '%'
+            JOIN folders d ON d.root_id = f.root_id AND starts_with(d."path", f."path")
             JOIN media m ON m.folder_id = d.folder_id
             WHERE f.folder_id = $1`;
         const res = await client.query(stm, [folder_id]);
@@ -182,7 +182,7 @@ async function completeTrash(trash_id, status, result) {
                 const sub = `
                     SELECT d.folder_id, d.root_id, d."path"
                     FROM folders f
-                    JOIN folders d ON d.root_id = f.root_id AND d."path" LIKE f."path" || '%'
+                    JOIN folders d ON d.root_id = f.root_id AND starts_with(d."path", f."path")
                     WHERE f.folder_id = $1`;
                 await client.query(`DELETE FROM media WHERE folder_id IN (SELECT folder_id FROM (${sub}) s)`,
                                    [res.rows[0].folder_id]);

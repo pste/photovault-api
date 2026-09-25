@@ -167,9 +167,9 @@ async function getBreadcrumb(root_id, folderPath) {
 // Si campiona dall'INTERO sottoalbero, non dai soli figli diretti: in un
 // archivio vero le foto stanno nelle foglie, quindi limitarsi ai figli diretti
 // lascerebbe grigie tutte le cartelle intermedie, che sono proprio quelle che
-// si vedono per prime. Il confronto per prefisso usa il path materializzato e
-// il suo indice text_pattern_ops; la LATERAL applica il LIMIT per cartella,
-// cosi' non si legge l'intero sottoalbero per poi buttarlo via.
+// si vedono per prime. Il confronto per prefisso usa il path materializzato
+// (vedi NOT_TRASHED_FOLDER in sqlparts.js sul perche' starts_with e non LIKE);
+// la LATERAL applica il LIMIT per cartella.
 async function getFolderPreviews(folder_ids, perFolder) {
     if (!folder_ids || folder_ids.length === 0) {
         return [];
@@ -184,7 +184,7 @@ async function getFolderPreviews(folder_ids, perFolder) {
                 FROM media m
                 JOIN folders f ON f.folder_id = m.folder_id
                 WHERE f.root_id = p.root_id
-                  AND f."path" LIKE p."path" || '%'
+                  AND starts_with(f."path", p."path")
                   AND m.missing_since IS NULL
                   AND m.thumb_status = 'done'
                   AND ${NOT_TRASHED_MEDIA('m')}

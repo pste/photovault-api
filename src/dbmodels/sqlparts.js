@@ -21,11 +21,17 @@ const NOT_TRASHED_OTHER = (alias) => `NOT EXISTS (
 // Una cartella e' "in cestino" anche quando lo e' un suo antenato: la rename
 // sposta l'intero sottoalbero, quindi mostrare una sottocartella di una
 // cartella cestinata sarebbe mostrare qualcosa che sul disco non c'e' piu'.
+//
+// Il confronto per prefisso e' starts_with e mai LIKE path || '%': in LIKE il
+// carattere _ e' un jolly, e "2019_01/" corrisponderebbe anche a "2019-01/".
+// Con lo stesso confronto completeTrash cancellava le righe della cartella
+// sorella. Vale per ogni sottoalbero: il path finisce sempre con '/', quindi
+// il prefisso non puo' fermarsi a meta' di un nome.
 const NOT_TRASHED_FOLDER = (alias) => `NOT EXISTS (
     SELECT 1 FROM trash tr
     JOIN folders tf ON tf.folder_id = tr.folder_id
     WHERE tr."status" = 'pending'
       AND tf.root_id = ${alias}.root_id
-      AND ${alias}."path" LIKE tf."path" || '%')`;
+      AND starts_with(${alias}."path", tf."path"))`;
 
 module.exports = { NOT_TRASHED_MEDIA, NOT_TRASHED_OTHER, NOT_TRASHED_FOLDER };
