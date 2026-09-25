@@ -77,9 +77,14 @@ async function claimNextJob(names) {
     try {
         await reapStaleJobs(client);
 
+        // FOR UPDATE SKIP LOCKED e il secondo status = 'pending' servono a due
+        // claim simultanei. Senza, il secondo aspettava il lock della riga, poi
+        // ricontrollava solo job_id -- ancora vero -- e riceveva lo stesso job
+        // del primo, con started riscritto: due pod sullo stesso lavoro.
         const stm = `
             UPDATE jobs SET status = 'running', started = NOW(), heartbeat = NOW()
-            WHERE job_id = (
+            WHERE status = 'pending'
+              AND job_id = (
                 SELECT job_id FROM jobs
                 WHERE status = 'pending'
                   AND "when" <= NOW()
@@ -87,6 +92,7 @@ async function claimNextJob(names) {
                   AND "name" NOT IN (SELECT "name" FROM jobs WHERE status = 'running')
                 ORDER BY "when" ASC
                 LIMIT 1
+                FOR UPDATE SKIP LOCKED
             )
             RETURNING *`;
         logger.trace({ names }, 'DB: claimNextJob');
